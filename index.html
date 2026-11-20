@@ -64,8 +64,13 @@ input[type=range]{accent-color:var(--gold);height:36px} select,.field{background
 input[type=range]:hover{accent-color:var(--gold2)}
 .timeline{overflow:auto;border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,#101013,#0b0b0e);min-height:340px;position:relative}
 .ruler{height:28px;background:#0c0c0f;border-bottom:1px solid var(--line);display:flex;position:sticky;top:0;z-index:3}.ruler div{flex:0 0 80px;border-right:1px solid #26262d;font-size:11px;color:var(--dim);padding:6px;font-family:"JetBrains Mono",monospace}
-.clip{position:absolute;height:44px;border-radius:8px;padding:6px 8px;font-size:12px;font-weight:700;color:#08110c;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,.4);transition:filter .15s ease}
+.lane{height:72px;position:relative;border-bottom:1px solid #26262d;background:repeating-linear-gradient(90deg,transparent 0 79px,#222 79px 80px)}
+.clip{position:absolute;top:8px;height:56px;border-radius:8px;padding:4px 8px;font-size:12px;font-weight:700;color:#08110c;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,.4);transition:filter .15s ease}
 .clip:hover{filter:brightness(1.12)}
+.clip .clip-title{display:block;height:14px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px}
+.clip canvas.wave{display:block;width:100%;height:22px;margin-top:1px;border-radius:4px;background:rgba(0,0,0,.16)}
+.clip .clip-meta{display:block;height:10px;line-height:10px;font-size:9px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.82}
+.clip.missing{outline:2px dashed #e94f37;outline-offset:-2px}
 .playhead{position:absolute;top:0;bottom:0;width:2px;background:linear-gradient(180deg,var(--gold2),var(--gold));box-shadow:0 0 10px rgba(245,197,66,.8),0 0 26px rgba(245,197,66,.35);z-index:5;pointer-events:none}
 .playhead::before{content:"";position:absolute;top:0;left:-5px;border:6px solid transparent;border-top:8px solid var(--gold2)}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}.tabs button{flex:1;min-height:44px;border-radius:10px;border:1px solid var(--line);background:#0e0e11;color:#fff;font-weight:800;letter-spacing:.04em;transition:all .15s ease}
@@ -166,7 +171,10 @@ footer{padding:18px 14px 30px;color:var(--dim);font-size:13px;line-height:1.6}
 
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-let AC=null; function ac(){ if(!AC) AC=new (window.AudioContext||window.webkitAudioContext)(); if(AC.state==='suspended') AC.resume(); return AC; }
+let AC=null; function ac(){ if(!AC) AC=new (window.AudioContext||window.webkitAudioContext)(); if(AC.state==='suspended'){ const p=AC.resume(); if(p&&p.catch) p.catch(()=>{}); } return AC; }
+// Play schedules against a RUNNING context. iOS Safari can strand sources started
+// at a currentTime captured while the context is still suspended, so await resume.
+async function audioReady(){ const c=ac(); if(c.state!=='running' && typeof c.resume==='function'){ try{ await c.resume(); }catch(e){} } return c; }
 function tone(freq,t=0.25,type='sine',gain=0.15,when=0){ const c=ac(),o=c.createOscillator(),g=c.createGain(); o.type=type;o.frequency.value=freq; g.gain.setValueAtTime(gain,c.currentTime+when); g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+when+t); o.connect(g).connect(c.destination); o.start(c.currentTime+when); o.stop(c.currentTime+when+t+0.05); }
 function drum(kind,when=0){ const c=ac(),t=c.currentTime+when; if(kind==='Kick'){tone(120,0.18,'sine',0.35,when);tone(50,0.22,'sine',0.3,when)} else if(kind==='Snare'){tone(180,0.12,'triangle',0.2,when)} else if(kind==='Hat'){tone(6000,0.05,'square',0.06,when)} else {tone(300,0.15,'sawtooth',0.12,when)} }
 const COLORS=['#e94f37','#f5c542','#2ec4b6','#4da3ff','#b388ff','#ff9f43','#3ddc84','#ff6b9d'];
@@ -182,7 +190,30 @@ function render(){ $('#trackList').innerHTML=state.tracks.map((t,i)=>'<div class
  $('#lanes').querySelectorAll('.lane')?.forEach(e=>e.remove());
  // ruler
  $('#ruler').innerHTML=Array.from({length:16},(_,i)=>'<div>Bar '+(i+1)+'</div>').join('');
- state.tracks.forEach((t,ti)=>{ const lane=document.createElement('div'); lane.className='lane'; lane.onclick=()=>{state.selectedTrack=ti;render()}; t.clips.forEach(c=>{ const el=document.createElement('div'); el.className='clip'; el.style.left=(12+c.start*80)+'px'; el.style.width=(c.len*80-8)+'px'; el.style.background=t.color; el.textContent=c.name+' • '+t.name; if(c.peaks && c.peaks.length){ const cv=document.createElement('canvas'); cv.width=Math.max(60,(c.len||1)*70); cv.height=20; cv.style.cssText='display:block;width:100%;height:20px;margin-top:2px'; const cx=cv.getContext('2d'); cx.fillStyle='rgba(0,0,0,.6)'; const w=cv.width,h=cv.height; c.peaks.forEach((pk,i)=>{ const x=(i/c.peaks.length)*w; const bh=Math.max(1,pk*h); cx.fillRect(x,(h-bh)/2,Math.max(1,w/c.peaks.length-1),bh); }); el.appendChild(cv); } if(c.duration){ const sm=document.createElement('small'); sm.textContent=' '+c.duration.toFixed(1)+'s — press Play'; el.appendChild(sm); } el.draggable=true; el.ondragstart=e=>{e.dataTransfer.setData('text/plain',JSON.stringify({ti,ci:c.id}))}; el.onclick=e=>{e.stopPropagation();state.selectedTrack=ti;state.selectedClip=c.id;render()}; lane.appendChild(el)}); $('#lanes').appendChild(lane); });
+ state.tracks.forEach((t,ti)=>{
+   const lane=document.createElement('div'); lane.className='lane'; lane.onclick=()=>{state.selectedTrack=ti;render()};
+   (t.clips||[]).forEach(c=>{
+     const el=document.createElement('div'); el.className='clip';
+     el.style.left=(12+(c.start||0)*80)+'px'; el.style.width=Math.max(24,(c.len||1)*80-8)+'px'; el.style.background=t.color;
+     const missing=!!(c.audioId && !audioBuffers[c.audioId] && audioRestoreDone);
+     if(missing) el.classList.add('missing');
+     const title=document.createElement('span'); title.className='clip-title'; title.textContent=c.name+' • '+t.name; el.appendChild(title);
+     if(c.peaks && c.peaks.length){
+       const cv=document.createElement('canvas'); cv.className='wave';
+       cv.width=Math.max(60,(c.len||1)*70); cv.height=30;
+       const cx=cv.getContext('2d'); cx.fillStyle='rgba(0,0,0,.68)'; // dark peaks over the bright track colour
+       const w=cv.width,h=cv.height,bw=Math.max(1,w/c.peaks.length-0.5);
+       c.peaks.forEach((pk,i)=>{ const bh=Math.max(1,pk*h); cx.fillRect((i/c.peaks.length)*w,(h-bh)/2,bw,bh); });
+       el.appendChild(cv);
+     }
+     const sm=document.createElement('small'); sm.className='clip-meta';
+     sm.textContent=missing?'⚠ no audio file in this browser — re-import it':(c.duration?c.duration.toFixed(1)+'s — press Play':'');
+     if(sm.textContent) el.appendChild(sm);
+     el.draggable=true; el.ondragstart=e=>{e.dataTransfer.setData('text/plain',JSON.stringify({ti,ci:c.id}))};
+     el.onclick=e=>{e.stopPropagation();state.selectedTrack=ti;state.selectedClip=c.id;render()}; lane.appendChild(el);
+   });
+   $('#lanes').appendChild(lane);
+ });
  $('#mixer').innerHTML=state.tracks.map((t,i)=>'<div class="strip"><b>'+t.name+'</b><br><span class="muted">'+t.type+'</span><br><input type="range" min="0" max="100" value="'+t.vol+'" data-vol="'+i+'"><div>'+t.vol+'%</div><button class="btn" data-act="mute" data-i="'+i+'">M</button></div>').join('');
  $('#markerList').innerHTML=(state.markers||[]).map(m=>'<li><span>'+m+'</span></li>').join('')||'<li><span class="muted">No markers yet</span></li>';
  renderPiano(); renderProjects(); bindTrackControls(); }
@@ -193,6 +224,8 @@ function renderPiano(){ const notes=['C4','D4','E4','F4','G4','A4','B4','C5']; $
 
 // ---- Real audio import engine (v2 fix, 2026-11-20) ----
 const audioBuffers = {}; const audioSources = [];
+let audioRestoreDone=false, audioRestorePromise=null;
+function ensureAudioRestored(){ if(!audioRestorePromise) audioRestorePromise=restoreAudioFromIDB(); return audioRestorePromise; }
 window.__reaAudioBuffers = audioBuffers;
 function importStatus(msg, isErr){ const el=document.getElementById('importStatus'); if(el){ el.textContent=msg; el.style.borderColor=isErr?'#e94f37':'var(--gold)'; el.style.color=isErr?'#ffb3a7':''; } const pt=document.getElementById('progTxt'); if(pt) pt.textContent=msg; }
 function idbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open('rea-audio-db',1); r.onupgradeneeded=()=>{ if(!r.result.objectStoreNames.contains('files')) r.result.createObjectStore('files'); }; r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
@@ -260,12 +293,100 @@ async function handleAnyImport(file, inputEl){
   if(file.type.startsWith('audio/') || /\.(wav|mp3|m4a|ogg|oga|flac|aif|aiff|aac|opus|webm)$/.test(name) || file.type===''){ await importAudioFile(file); return; }
   importStatus('That file type is not supported for import: '+(file.type||'unknown')+' — use WAV, MP3, M4A, FLAC or a .rea.json project.', true);
 }
-function scheduleAudio(){ stopAudioSources(); const ctx=ac(); const secPerBar=(60/state.bpm)*4; const hasSolo=state.tracks.some(t=>t.solo); state.tracks.forEach(t=>{ if(t.mute) return; if(hasSolo && !t.solo) return; (t.clips||[]).forEach(c=>{ const buf=c.audioId && audioBuffers[c.audioId]; if(!buf) return; const src=ctx.createBufferSource(); src.buffer=buf; const g=ctx.createGain(); g.gain.value=((t.vol==null?80:t.vol)/100); if(ctx.createStereoPanner){ const pn=ctx.createStereoPanner(); pn.pan.value=((t.pan||0)/100); g.connect(pn); pn.connect(ctx.destination); } else { g.connect(ctx.destination); } src.connect(g); src.start(ctx.currentTime+0.08+((c.start||0)*secPerBar)); audioSources.push(src); }); }); }
-function stopAudioSources(){ audioSources.forEach(src=>{ try{ src.stop(); }catch(e){} }); audioSources.length=0; }
-async function restoreAudioFromIDB(){ let restored=0, missing=0; for(const t of state.tracks){ for(const c of (t.clips||[])){ if(c.audioId && !audioBuffers[c.audioId]){ const blob=await idbGet(c.audioId); if(blob){ try{ audioBuffers[c.audioId]=await decodeAudioFile(blob); restored++; }catch(e){ missing++; } } else if(c.audioId){ missing++; } } } } if(restored){ render(); importStatus('Reloaded '+restored+' imported audio file(s) from this browser storage. Press Play.'); } else if(missing){ importStatus(missing+' audio clip(s) are in the project but their files are not in this browser (they were imported on another device/browser). Re-import the WAV to hear them here.', true); } }
+// Schedule ONLY audio that lives on an audible track's clips. The transport never
+// invents sounds: no track content (or a muted/solo-excluded track) means silence.
+function scheduleAudio(ctx, fromSec){
+  stopAudioSources();
+  ctx=ctx||ac(); fromSec=Math.max(0,fromSec||0);
+  const secPerBar=(60/state.bpm)*4, lead=0.06;
+  const hasSolo=state.tracks.some(t=>t.solo);
+  let scheduled=0, missing=0;
+  state.tracks.forEach(t=>{
+    if(t.mute || (hasSolo && !t.solo)) return;
+    (t.clips||[]).forEach(c=>{
+      if(!c.audioId) return;
+      const buf=audioBuffers[c.audioId];
+      if(!buf){ missing++; return; }
+      const clipStart=(c.start||0)*secPerBar;
+      const clipLen=Math.min((c.len||1)*secPerBar, buf.duration);
+      const clipEnd=clipStart+clipLen;
+      if(clipEnd<=fromSec+0.001) return;
+      const playFrom=Math.max(fromSec,clipStart);
+      const offset=playFrom-clipStart;
+      const dur=Math.max(0.01, Math.min(buf.duration-offset, clipEnd-playFrom));
+      const when=ctx.currentTime+lead+Math.max(0,clipStart-fromSec);
+      const src=ctx.createBufferSource(); src.buffer=buf;
+      const g=ctx.createGain(); g.gain.value=Math.max(0,Math.min(1,(t.vol==null?80:t.vol)/100));
+      if(typeof ctx.createStereoPanner==='function'){
+        const pn=ctx.createStereoPanner(); pn.pan.value=Math.max(-1,Math.min(1,(t.pan||0)/100));
+        g.connect(pn); pn.connect(ctx.destination);
+      } else g.connect(ctx.destination);
+      src.connect(g);
+      try{ src.start(when,offset,dur); }catch(e){ src.start(when); }
+      audioSources.push(src); scheduled++;
+    });
+  });
+  if(missing) importStatus(missing+' audio clip(s) have no decoded file in this browser — re-import the WAV to hear them.',true);
+  return scheduled;
+}
+function stopAudioSources(){
+  audioSources.forEach(src=>{ try{ src.stop(); }catch(e){} try{ src.disconnect&&src.disconnect(); }catch(e){} });
+  audioSources.length=0;
+}
+async function restoreAudioFromIDB(){
+  let restored=0, missing=0;
+  try{
+    for(const t of state.tracks){
+      for(const c of (t.clips||[])){
+        if(c.audioId && !audioBuffers[c.audioId]){
+          const blob=await idbGet(c.audioId);
+          if(blob){ try{ audioBuffers[c.audioId]=await decodeAudioFile(blob); restored++; }catch(e){ missing++; } }
+          else missing++;
+        }
+      }
+    }
+    if(restored) importStatus('Reloaded '+restored+' imported audio file(s) from this browser storage. Press Play.');
+    else if(missing) importStatus(missing+' audio clip(s) are in the project but their files are not in this browser (they were imported on another device/browser). Re-import the WAV to hear them here.',true);
+  } finally { audioRestoreDone=true; render(); }
+}
 // ---- end audio engine ----
-let playTimer=null,step=0;
-function setPlay(on){ state.playing=on; if(on){ try{ scheduleAudio(); }catch(e){ console.error(e); } } else { stopAudioSources(); } $('#btnPlay').textContent=on?'⏸':'▶'; if(on){ ac(); playTimer=setInterval(()=>{ step=(step+1)%64; const beat=step/4; $('#playhead').style.left=(12+beat*80)+'px'; $('#timeDisp').textContent=(Math.floor(beat/4)+1)+'.'+(Math.floor(beat%4)+1)+'.'+String(step%4*25).padStart(2,'0'); $('#secDisp').textContent=(beat*60/state.bpm).toFixed(2)+'s • '+state.bpm+' BPM • '+state.sig; if($('#metroChk').checked && step%4===0) tone(880,0.06,'square',0.08); if(step%16===0){ const t=state.tracks[state.selectedTrack]; } if(state.notes[step%16]){ const idx=[0,2,4,5,7,9,11,12][step%8]; tone(261.63*Math.pow(2,idx/12),0.22,'triangle',0.14);} if(step%8===0) drum('Kick'); if(step%8===4) drum('Snare'); }, 60000/state.bpm/4); } else { clearInterval(playTimer);} }
+let playTimer=null,step=0,playGeneration=0;
+function trackAudible(t){ const hasSolo=state.tracks.some(x=>x.solo); return !t.mute && (!hasSolo||t.solo); }
+// The single global piano-roll melody is a track instrument, not a free-floating
+// sequencer: it is silent unless an unmuted MIDI/Synth track with a clip exists.
+function melodyTrack(){ return state.tracks.find(t=>trackAudible(t) && /^(midi|synth)$/i.test(t.type||'') && (t.clips||[]).length>0); }
+function playheadSec(){ return step*(60/state.bpm)*4/16; }
+async function setPlay(on){
+  if(on && state.playing) return;                 // duplicate Play must not double-start
+  const gen=++playGeneration;                     // cancels a pending start after Stop
+  if(!on){
+    state.playing=false; stopAudioSources();
+    if(playTimer){ clearInterval(playTimer); playTimer=null; }
+    $('#btnPlay').textContent='▶'; return;
+  }
+  state.playing=true; $('#btnPlay').textContent='⏸';
+  try{
+    await ensureAudioRestored();                   // a reloaded tab may still be decoding
+    if(gen!==playGeneration || !state.playing) return;
+    const ctx=await audioReady();                  // resume() awaited BEFORE any scheduling
+    if(gen!==playGeneration || !state.playing) return;
+    scheduleAudio(ctx,playheadSec());
+    playTimer=setInterval(()=>{
+      step=(step+1)%64;
+      const beat=step/4;
+      $('#playhead').style.left=(12+beat*80)+'px';
+      $('#timeDisp').textContent=(Math.floor(beat/4)+1)+'.'+(Math.floor(beat%4)+1)+'.'+String(step%4*25).padStart(2,'0');
+      $('#secDisp').textContent=(beat*60/state.bpm).toFixed(2)+'s • '+state.bpm+' BPM • '+state.sig;
+      if($('#metroChk').checked && step%4===0) tone(880,0.06,'square',0.08); // explicit user opt-in only
+      const mt=melodyTrack();
+      if(mt && state.notes[step%16]){
+        const idx=[0,2,4,5,7,9,11,12][step%8];
+        tone(261.63*Math.pow(2,idx/12),0.22,'triangle',Math.max(0.01,((mt.vol==null?80:mt.vol)/100)*0.2));
+      }
+      // No hard-coded Kick/Snare: percussion exists only if a real clip plays it.
+    },60000/state.bpm/4);
+  }catch(e){ console.error('REA playback failed',e); stopAudioSources(); }
+}
 $('#btnPlay').onclick=()=>setPlay(!state.playing); $('#btnStop').onclick=()=>{setPlay(false); step=0; $('#playhead').style.left='12px'}; $('#btnRew').onclick=()=>{step=0}; $('#btnRec').onclick=e=>{e.target.classList.toggle('active'); alert('Record armed on selected track. In web REA, use Piano Roll / Drum Pads to write, or import audio.')};
 document.addEventListener('keydown',e=>{ if(e.code==='Space' && e.target.tagName!=='INPUT'){e.preventDefault(); setPlay(!state.playing)} if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault(); save();} });
 $('#btnSave').onclick=()=>save(); $('#btnNew').onclick=()=>{ if(confirm('Start a new project? Current is autosaved.')){ localStorage.removeItem('rea.autosave'); location.reload(); } };
@@ -288,7 +409,7 @@ $('#btnChordMarkers').onclick=()=>{ state.markers=(state._chords||['Am','F','C',
 $('#btnChordTrack').onclick=()=>{ state.tracks.unshift({id:Date.now(),name:'Chord Track',type:'MIDI',color:'#f5c542',vol:70,pan:0,mute:false,solo:false,clips:(state._chords||['Am','F','C','G']).map((c,i)=>({id:Date.now()+i,name:c,start:i*4,len:4,color:'#f5c542'}))}); save(true); render(); };
 $('#btnSetTempo').onclick=()=>{ $('#bpm').value=120; state.bpm=120; alert('Project tempo set to 120 BPM. All items were first locked to Time timebase, then the analysed item was set to Beats — same safe flow as desktop v1.2.'); save(true); };
 const padNames=['Kick','Snare','Hat','Clap','Tom','Perc','Crash','FX']; $('#pads').innerHTML=padNames.map((n,i)=>'<button class="pad" data-pad="'+n+'">'+n+'<br><small>'+(i+1)+'</small></button>').join(''); $$('[data-pad]').forEach(b=>b.onclick=()=>drum(b.dataset.pad));
-loadAutosave(); render(); restoreAudioFromIDB();
+loadAutosave(); render(); audioRestorePromise=restoreAudioFromIDB();
 (function(){ const tl=document.getElementById('timeline'); if(!tl) return; tl.addEventListener('dragover', e=>{ e.preventDefault(); }); tl.addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if(f) handleAnyImport(f, null); }); })();
 </script><script>
 // Cosmetic only: toggles a body class while REA is playing so the EQ,
