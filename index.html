@@ -167,8 +167,9 @@ footer{padding:18px 14px 30px;color:var(--dim);font-size:13px;line-height:1.6}
     <div class="tabs"><button class="on" data-stem="basic">Basic 4-Stem</button><button data-stem="scan">Scan</button><button data-stem="drums">Drums Only</button><button data-stem="scaler">Scaler</button></div>
     <div id="stemBasic"><label>Quality <select id="quality"><option>Fast draft</option><option selected>Standard</option><option>Ensemble HQ</option></select></label> <span class="muted">quality is desktop-only</span><div class="row"><label><input type="checkbox" checked data-stemchk="Vocals"> Vocals</label><label><input type="checkbox" checked data-stemchk="Drums"> Drums</label><label><input type="checkbox" checked data-stemchk="Bass"> Bass</label><label><input type="checkbox" checked data-stemchk="Other"> Other</label></div><button class="btn primary" id="btnSeparate" style="width:100%;margin-top:8px">Separate Selected Track</button><p class="muted">Runs the real spectral scan and opens the Scan tab. The Vocals box uses the harmonic stem (vocals + melody), not isolated vocals; Other uses Highs &amp; Air.</p></div>
     <div id="stemScan" hidden>
-      <p class="notice">Web preview separation (spectral) — full Demucs separation runs in desktop REAPER.</p>
-      <button class="btn" id="btnScan" style="width:100%">Scan for Instruments</button>
+      <p class="notice" id="scanHonesty">Web preview separation (spectral) — full Demucs separation runs in desktop REAPER.</p>
+      <div class="row"><label for="scanEngine">Engine</label><select id="scanEngine"><option value="spectral" selected>Spectral preview (fast)</option><option value="ai">AI — Demucs (HQ, short clips)</option></select></div>
+      <div class="row"><button class="btn" id="btnScan" style="flex:1">Scan for Instruments</button><button class="btn danger" id="btnScanCancel" hidden>Cancel</button></div>
       <p class="muted" id="scanStatus">No preview yet — import an audio clip, then Scan.</p>
       <ul class="list" id="scanList"></ul>
       <div class="row" id="scanAudition" hidden><button class="btn teal" id="btnPlayMix">▶ Play Mix</button><button class="btn" id="btnStopAudition">■ Stop</button><button class="btn primary" id="btnCommitScan" disabled>Create Tracks</button><button class="btn" id="btnDiscardScan">Discard</button></div>
@@ -979,9 +980,316 @@ $('#btnSetTempo').onclick=()=>{
   if(state._tempoResult) $('#scalerOut').innerHTML=tempoResultHTML(state._tempoResult)+'<br><b>Applied to project:</b> '+bpm.toFixed(1)+' BPM.';
   else $('#scalerOut').textContent='Project tempo set to '+bpm.toFixed(1)+' BPM.';
 };
+  // ---- AI engine: Demucs in the browser (lane 10) ----
+  // Nothing here runs at startup: ORT Web is dynamically imported and the model is
+  // fetched only from the AI Scan handler below. The spectral path is untouched.
+  const AI_MAX_SEC=30, AI_SR=44100;
+  const AI_MODEL_URL='https://huggingface.co/kramp/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx';
+  const AI_ORT_VERSION='1.27.0', AI_ORT_CDN='https://cdn.jsdelivr.net/npm/onnxruntime-web@'+AI_ORT_VERSION+'/dist/';
+  const AI_MODEL_CACHE='lane9-demucs-model-v1';
+  const AI_TRACKS=['drums','bass','other','vocals'], AI_NAMES=['Drums','Bass','Other','Vocals'], AI_TYPES=['Drums','Bass','Audio','Vocals'];
+  /* AI DSP START — ported verbatim from spike.html (lane 9, timcsy/demucs-web MIT) */
+  const aiDSP=(()=>{
+  const SR = 44100, FFT = 4096, HOP = 1024, SEG = 343980;
+  const BINS = 2048, FRAMES = 336, STRIDE = Math.floor(SEG * 0.75);
+  const TRACKS = ['drums', 'bass', 'other', 'vocals'];
+  const HANN = (() => { const w = new Float32Array(FFT); for (let i = 0; i < FFT; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / FFT)); return w; })();
+  const twCache = new Map();
+  function twiddles(n, inverse) {
+    const key = `${n}:${inverse}`;
+    if (twCache.has(key)) return twCache.get(key);
+    const re = new Float32Array(n / 2), im = new Float32Array(n / 2);
+    const s = inverse ? 2 : -2;
+    for (let k = 0; k < n / 2; k++) { const a = s * Math.PI * k / n; re[k] = Math.cos(a); im[k] = Math.sin(a); }
+    const t = { re, im }; twCache.set(key, t); return t;
+  }
+  function bitRev(i, bits) { let r = 0; for (let b = 0; b < bits; b++) { r = (r << 1) | (i & 1); i >>= 1; } return r; }
+  /** In-place radix-2 FFT on Float32Arrays of length n (power of 2). */
+  function fft(re, im, inverse) {
+    const n = re.length, bits = Math.log2(n) | 0, tw = twiddles(n, inverse);
+    for (let i = 0; i < n; i++) { const j = bitRev(i, bits); if (j > i) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (let size = 2; size <= n; size *= 2) {
+      const half = size / 2, step = n / size;
+      for (let i = 0; i < n; i += size) for (let j = 0; j < half; j++) {
+        const k = j * step, tr = tw.re[k], ti = tw.im[k], a = i + j, b = a + half;
+        const er = re[a], ei = im[a];
+        const or_ = re[b] * tr - im[b] * ti, oi = re[b] * ti + im[b] * tr;
+        re[a] = er + or_; im[a] = ei + oi; re[b] = er - or_; im[b] = ei - oi;
+      }
+    }
+    if (inverse) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+  }
+  function reflectPad(x, padL, padR) {
+    const n = x.length, out = new Float32Array(padL + n + padR);
+    for (let i = 0; i < padL; i++) out[i] = x[Math.min(padL - i, n - 1)];
+    out.set(x, padL);
+    for (let i = 0; i < padR; i++) out[padL + n + i] = x[Math.max(0, n - 2 - i)];
+    return out;
+  }
+  function stft(signal) {
+    const nf = Math.floor((signal.length - FFT) / HOP) + 1, nb = BINS + 1, scale = 1 / Math.sqrt(FFT);
+    const real = new Float32Array(nf * nb), imag = new Float32Array(nf * nb);
+    const fr = new Float32Array(FFT), fi = new Float32Array(FFT), win = new Float32Array(FFT);
+    for (let f = 0; f < nf; f++) {
+      const off = f * HOP;
+      for (let i = 0; i < FFT; i++) win[i] = signal[off + i] * HANN[i];
+      fr.set(win); fi.fill(0); fft(fr, fi, false);
+      for (let k = 0; k < nb; k++) { real[f * nb + k] = fr[k] * scale; imag[f * nb + k] = fi[k] * scale; }
+    }
+    return { real, imag, nb };
+  }
+  function istft(specR, specI, nf, nb, length) {
+    const out = new Float32Array(length), ws = new Float32Array(length);
+    const fr = new Float32Array(FFT), fi = new Float32Array(FFT), scale = Math.sqrt(FFT);
+    for (let f = 0; f < nf; f++) {
+      fr.fill(0); fi.fill(0);
+      for (let k = 0; k < nb; k++) { fr[k] = specR[f * nb + k]; fi[k] = specI[f * nb + k]; }
+      for (let k = 1; k < nb - 1; k++) { fr[FFT - k] = fr[k]; fi[FFT - k] = -fi[k]; }
+      fft(fr, fi, true);
+      const s = f * HOP, e = Math.min(s + FFT, length);
+      for (let i = 0; i < e - s; i++) { out[s + i] += fr[i] * HANN[i] * scale; ws[s + i] += HANN[i] * HANN[i]; }
+    }
+    for (let i = 0; i < length; i++) if (ws[i] > 1e-8) out[i] /= ws[i];
+    return out;
+  }
+  function prepareInput(L, R) {
+    const pl = new Float32Array(SEG), pr = new Float32Array(SEG), c = Math.min(L.length, SEG);
+    pl.set(L.subarray(0, c)); pr.set(R.subarray(0, c));
+    const le = Math.ceil(SEG / HOP), pad = Math.floor(HOP / 2) * 3, padR = pad + le * HOP - SEG;
+    const sl = reflectPad(reflectPad(pl, pad, padR), FFT / 2, FFT / 2);
+    const sr = reflectPad(reflectPad(pr, pad, padR), FFT / 2, FFT / 2);
+    const a = stft(sl), b = stft(sr);
+    const mag = new Float32Array(4 * BINS * FRAMES);
+    for (let f = 0; f < FRAMES; f++) {
+      const sf = f + 2;
+      for (let bin = 0; bin < BINS; bin++) {
+        const o = bin * FRAMES + f;
+        mag[o] = a.real[sf * a.nb + bin];
+        mag[BINS * FRAMES + o] = a.imag[sf * a.nb + bin];
+        mag[2 * BINS * FRAMES + o] = b.real[sf * b.nb + bin];
+        mag[3 * BINS * FRAMES + o] = b.imag[sf * b.nb + bin];
+      }
+    }
+    const waveform = new Float32Array(2 * SEG); waveform.set(pl, 0); waveform.set(pr, SEG);
+    return { waveform, mag };
+  }
+  function ispec(track, base, target) {
+    // freq layout [channel, bin, frame] -> padded (FRAMES+4, BINS+1), frame offset 2
+    const nb = BINS + 1, nf = FRAMES + 4;
+    const padChannel = (ch) => {
+      const r = new Float32Array(nf * nb), i = new Float32Array(nf * nb);
+      for (let f = 0; f < FRAMES; f++) for (let bin = 0; bin < BINS; bin++) {
+        const src = bin * FRAMES + f, dst = (f + 2) * nb + bin;
+        r[dst] = track[base + ch * BINS * FRAMES + src];
+        i[dst] = track[base + (ch + 1) * BINS * FRAMES + src];
+      }
+      return { r, i };
+    };
+    const l = padChannel(0), r = padChannel(2);
+    const len = (nf - 1) * HOP + FFT, off = FFT / 2 + Math.floor(HOP / 2) * 3;
+    const L = istft(l.r, l.i, nf, nb, len).subarray(off, off + target);
+    const R = istft(r.r, r.i, nf, nb, len).subarray(off, off + target);
+    return { L, R };
+  }
+  return {SR,FFT,HOP,SEG,BINS,FRAMES,STRIDE,TRACKS,HANN,twiddles,bitRev,fft,reflectPad,stft,istft,prepareInput,ispec};
+  })();
+  /* AI DSP END */
+  const {SEG:AI_SEG,STRIDE:AI_STRIDE,BINS:AI_BINS,FRAMES:AI_FRAMES,prepareInput:aiPrepareInput,ispec:aiIspec}=aiDSP;
+  let aiOrt=null, aiSession=null, aiInputNames=[], aiOutputNames=[], aiModelBytes=null, aiCancel=false;
+  const aiHooks={ensureSession:null,separate:null};  // deterministic test seam; null in normal use
+  function aiEngine(){ const el=document.getElementById?document.getElementById('scanEngine'):null; const v=el&&el.value; return v==='ai'?'ai':'spectral'; }
+  function aiHonesty(){
+    const el=document.getElementById?document.getElementById('scanHonesty'):null; if(!el) return;
+    el.textContent=aiEngine()==='ai'
+      ? 'AI separation (Demucs, runs on this device) — 180 MB model downloads once; short clips up to 30 s.'
+      : 'Web preview separation (spectral) — full Demucs separation runs in desktop REAPER.';
+  }
+  function aiProgressDownload(loaded,total){
+    const mb=x=>Math.round((x||0)/1048576);
+    scanStatus('Downloading AI model… '+mb(loaded)+'/'+mb(total||180*1048576)+' MB (first time only)');
+  }
+  async function aiGetModel(){
+    if(aiModelBytes) return aiModelBytes;
+    let cache=null;
+    if(typeof caches!=='undefined'&&caches&&caches.open){
+      try{ cache=await caches.open(AI_MODEL_CACHE); const hit=await cache.match(AI_MODEL_URL);
+        if(hit){ scanStatus('Loading model… (cached model)'); aiModelBytes=await hit.arrayBuffer(); return aiModelBytes; } }catch(e){}
+    }
+    aiProgressDownload(0,180*1048576);
+    // Bound alias: resolved here, never called at startup, and injectable in tests.
+    const aiNetFetch=(typeof window!=='undefined'&&typeof window.fetch==='function')?window.fetch.bind(window):null;
+    if(!aiNetFetch) throw new Error('AI model fetch is unavailable (offline?)');
+    const res=await aiNetFetch(AI_MODEL_URL);
+    if(!res.ok) throw new Error('AI model fetch failed: HTTP '+res.status);
+    const total=Number((res.headers&&res.headers.get&&res.headers.get('Content-Length'))||0)||180*1048576;
+    const chunks=[]; let loaded=0;
+    if(res.body&&typeof res.body.getReader==='function'){
+      const reader=res.body.getReader();
+      for(;;){ const {done,value}=await reader.read(); if(done) break; chunks.push(value); loaded+=value.length; aiProgressDownload(loaded,total); }
+    }else{ const ab=await res.arrayBuffer(); chunks.push(new Uint8Array(ab)); loaded=ab.byteLength; aiProgressDownload(loaded,total); }
+    const bytes=new Uint8Array(loaded); let o=0; for(const c of chunks){ bytes.set(c,o); o+=c.length; }
+    aiModelBytes=bytes.buffer;
+    if(cache){ try{ await cache.put(AI_MODEL_URL,new Response(bytes.slice(0),{headers:{'Content-Type':'application/octet-stream'}})); }catch(e){} }
+    return aiModelBytes;
+  }
+  async function aiEnsureSession(){
+    if(aiSession) return aiSession;
+    if(!aiOrt){
+      scanStatus('Loading ONNX Runtime Web…');
+      aiOrt=await import(AI_ORT_CDN+'ort.webgpu.bundle.min.mjs');
+      if(aiOrt.env&&aiOrt.env.wasm){ aiOrt.env.wasm.numThreads=1; aiOrt.env.wasm.wasmPaths=AI_ORT_CDN; } // no COOP/COEP needed
+    }
+    scanStatus('Loading model…');
+    const bytes=await aiGetModel();
+    aiSession=await aiOrt.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'basic'});
+    aiInputNames=aiSession.inputNames||[]; aiOutputNames=aiSession.outputNames||[];
+    return aiSession;
+  }
+  function aiFreeTensors(feeds,res){
+    if(feeds) for(const k of Object.keys(feeds)) delete feeds[k];
+    if(res) for(const k of Object.keys(res)) delete res[k];
+  }
+  // Same overlap/add segment contract as the spike; only cancel/progress and
+  // explicit tensor release are added. The STFT/iSTFT code itself is untouched.
+  async function aiSeparateCore(L,R,onSegment){
+    const total=L.length;
+    const acc=AI_TRACKS.map(()=>({L:new Float64Array(total),R:new Float64Array(total)}));
+    const weights=new Float64Array(total);
+    const segCount=Math.max(1,Math.ceil(total/AI_STRIDE));
+    let n=0;
+    for(let start=0;start<total;start+=AI_STRIDE){
+      if(aiCancel){ const e=new Error('AI scan cancelled'); e.cancelled=true; throw e; }
+      const end=Math.min(start+AI_SEG,total), slen=end-start;
+      const sl=new Float32Array(AI_SEG), sr=new Float32Array(AI_SEG);
+      sl.set(L.subarray(start,end)); sr.set(R.subarray(start,end));
+      const {waveform,mag}=aiPrepareInput(sl,sr);
+      const feeds={};
+      feeds[aiInputNames[0]]=new aiOrt.Tensor('float32',waveform,[1,2,AI_SEG]);
+      feeds[aiInputNames[1]]=new aiOrt.Tensor('float32',mag,[1,4,AI_BINS,AI_FRAMES]);
+      const res=await aiSession.run(feeds);
+      let timeData=null, freqData=null;
+      for(const name of aiOutputNames){
+        const t=res[name];
+        if(t.dims.length===4&&t.dims[2]===2) timeData=t.data;
+        else if(t.dims.length===5&&t.dims[2]===4) freqData=t.data;
+      }
+      if(!timeData) throw new Error('No time-domain output tensor');
+      const ramp=AI_STRIDE*0.5;
+      for(let t=0;t<4;t++){
+        const recon=freqData?aiIspec(freqData,t*4*AI_BINS*AI_FRAMES,AI_SEG):{L:new Float32Array(AI_SEG),R:new Float32Array(AI_SEG)};
+        for(let i=0;i<slen;i++){
+          const fade=Math.min(i/ramp,(slen-i)/ramp,1);
+          const base=t*2*AI_SEG+i;
+          acc[t].L[start+i]+=(timeData[base]+recon.L[i])*fade;
+          acc[t].R[start+i]+=(timeData[base+AI_SEG]+recon.R[i])*fade;
+          if(t===0) weights[start+i]+=fade;
+        }
+      }
+      n++;
+      if(typeof onSegment==='function') onSegment(n,segCount,slen);
+      aiFreeTensors(feeds,res); timeData=null; freqData=null;
+      await new Promise(r=>setTimeout(r,0));
+    }
+    const out=AI_TRACKS.map(()=>({L:new Float32Array(total),R:new Float32Array(total)}));
+    for(let t=0;t<4;t++) for(let i=0;i<total;i++){
+      const w=weights[i]||1;
+      out[t].L[i]=acc[t].L[i]/w; out[t].R[i]=acc[t].R[i]/w;
+    }
+    acc.length=0;
+    return {stems:out,segments:n};
+  }
+  function aiResampleChannel(src,srcRate,startSec,outN){
+    const out=new Float32Array(outN);
+    if(srcRate===AI_SR){ const from=Math.min(src.length,Math.floor(startSec*srcRate)); const c=Math.min(outN,Math.max(0,src.length-from)); out.set(src.subarray(from,from+c),0); return out; }
+    const ratio=srcRate/AI_SR;
+    for(let i=0;i<outN;i++){
+      const p=(startSec+i/AI_SR)*srcRate;
+      const i0=Math.floor(p); if(i0<0){ out[i]=0; continue; } if(i0>=src.length-1){ out[i]=src[src.length-1]||0; continue; }
+      const f=p-i0; out[i]=src[i0]*(1-f)+src[i0+1]*f;
+    }
+    return out;
+  }
+  function aiClipSegment(picked){
+    const sr=picked.buffer.sampleRate||AI_SR, secPerBar=(60/state.bpm)*4;
+    const offsetSec=Math.max(0,picked.clip.offset||0);
+    const fullSec=Math.max(0,(picked.buffer.duration||picked.buffer.length/sr)-offsetSec);
+    const clipSec=Math.min((picked.clip.len||1)*secPerBar,fullSec);
+    const useSec=Math.min(clipSec,AI_MAX_SEC);
+    const truncated=clipSec>AI_MAX_SEC+1e-6;
+    const n=Math.max(1,Math.floor(useSec*AI_SR));
+    const chans=picked.buffer.numberOfChannels||1, parts=[];
+    for(let c=0;c<chans;c++) parts.push(aiResampleChannel(picked.buffer.getChannelData(c),sr,offsetSec,n));
+    const L=parts[0], R=chans>1?parts[1]:new Float32Array(L); // mono -> dual mono, as in the spike
+    return {buffer:scanMakeBuffer([L,R],AI_SR),L,R,useSec,clipSec,offsetSec,truncated};
+  }
+  async function scanRunAI(opts){
+    const picked=pickClipForAnalysis();
+    if(!picked){ scanStatus('Import an audio clip first — Scan needs real audio from a clip.'); importStatus('Import an audio clip first — Scan needs real audio from a clip.',true); return null; }
+    if(scanBusy) return null;
+    scanBusy=true; aiCancel=false;
+    const btn=document.getElementById?document.getElementById('btnScan'):null; if(btn) btn.disabled=true;
+    const cancelBtn=document.getElementById?document.getElementById('btnScanCancel'):null; if(cancelBtn) cancelBtn.hidden=false;
+    scanStopAudition();
+    try{
+      const seg=aiClipSegment(picked);
+      scanStatus('Preparing '+seg.useSec.toFixed(1)+' s for AI separation…');
+      if(typeof requestAnimationFrame==='function') await new Promise(r=>requestAnimationFrame(()=>r()));
+      if(aiCancel){ const e=new Error('AI scan cancelled'); e.cancelled=true; throw e; }
+      if(aiHooks.ensureSession) await aiHooks.ensureSession((s)=>scanStatus(s));
+      else await aiEnsureSession();
+      if(aiCancel){ const e=new Error('AI scan cancelled'); e.cancelled=true; throw e; }
+      const onSegment=(n,total)=>scanStatus('Separating… segment '+n+'/'+total);
+      const out=aiHooks.separate
+        ? await aiHooks.separate(seg.L,seg.R,onSegment)
+        : await aiSeparateCore(seg.L,seg.R,onSegment);
+      if(out&&out.cancelled){ const e=new Error('AI scan cancelled'); e.cancelled=true; throw e; }
+      const arrays=(out&&out.stems)||out;
+      if(!Array.isArray(arrays)||arrays.length!==4) throw new Error('AI separation did not return four stems');
+      const stems=arrays.map((a,i)=>{
+        const b=scanMakeBuffer([a.L,a.R],AI_SR), rmsDb=scanRmsDb(b), detected=rmsDb>SCAN_DETECT_DB;
+        return {id:AI_TRACKS[i],name:AI_NAMES[i],type:AI_TYPES[i],buffer:b,rmsDb:rmsDb,energy:scanEnergy(b),energyPct:0,
+                detected:detected,include:detected,mute:false,solo:false};
+      });
+      if(opts&&Array.isArray(opts.includeIds)) stems.forEach(s=>{ s.include=opts.includeIds.indexOf(s.id)>=0; });
+      const total=stems.reduce((a,s)=>a+s.energy,0)||1;
+      stems.forEach(s=>{ s.energyPct=Math.round(1000*s.energy/total)/10; });
+      scanPreview={mode:'scan',engine:'ai',clipId:picked.clip.id,clipName:picked.clip.name,clipStart:picked.clip.start||0,
+                   sourceBuffer:seg.buffer,stems,analysedSeconds:seg.useSec,truncated:seg.truncated};
+      scanRenderList();
+      const commit=document.getElementById?document.getElementById('btnCommitScan'):null; if(commit) commit.disabled=false;
+      const aud=document.getElementById?document.getElementById('scanAudition'):null; if(aud) aud.hidden=false;
+      let msg='Scanned '+picked.clip.name+' — '+seg.useSec.toFixed(1)+' s, 4 AI stems (Drums, Bass, Other, Vocals). Audition in place, then Create Tracks or Discard.';
+      if(seg.truncated) msg='AI analysed the first 30 s of this clip. '+msg;
+      scanStatus(msg);
+      return scanPreview;
+    }catch(e){
+      scanClearPreview();
+      scanStatus((e&&e.cancelled)?'AI scan cancelled — no preview, no tracks created.':('AI scan failed: '+((e&&e.message)||e)));
+      return null;
+    }finally{
+      scanBusy=false; aiCancel=false;
+      if(btn) btn.disabled=false;
+      if(cancelBtn) cancelBtn.hidden=true;
+    }
+  }
+  window.__reaAI={state:()=>({engine:aiEngine(),session:!!aiSession,modelBytes:!!aiModelBytes,ort:!!aiOrt,cancel:aiCancel,mock:!!aiHooks.separate}),
+    hooks:aiHooks,setOrt:o=>{aiOrt=o},getModel:aiGetModel,ensureSession:aiEnsureSession,
+    reset:()=>{aiSession=null;aiModelBytes=null;aiOrt=null;aiInputNames=[];aiOutputNames=[];aiCancel=false},
+    MAX_SEC:AI_MAX_SEC,MODEL_URL:AI_MODEL_URL,ORT_CDN:AI_ORT_CDN};
+  const scanEngineEl=document.getElementById?document.getElementById('scanEngine'):null;
+  if(scanEngineEl) scanEngineEl.onchange=()=>{
+    aiHonesty();
+    scanStatus(aiEngine()==='ai'
+      ? 'AI engine selected — first scan downloads the 180 MB model; clips are capped at 30 s.'
+      : 'Spectral preview selected — fast, no download. No preview yet — import an audio clip, then Scan.');
+  };
+  const scanCancelEl=document.getElementById?document.getElementById('btnScanCancel'):null;
+  if(scanCancelEl) scanCancelEl.onclick=()=>{ if(scanBusy){ aiCancel=true; scanStatus('Cancelling AI scan…'); } };
+  aiHonesty();
   // ---- Scan tab: real spectral preview + in-place audition + commit (lane 7) ----
-  // True ML separation (Demucs) cannot run in a browser. This is an honest STFT
-  // harmonic/percussive mask preview on the selected clip's decoded AudioBuffer.
+  // The spectral engine is an honest STFT harmonic/percussive mask preview on the
+  // selected clip's decoded AudioBuffer; the optional AI engine above runs Demucs
+  // in the browser. Both feed the same list/audition/commit path.
   // It never edits the project until Create Tracks is pressed.
   const SCAN_FFT=2048, SCAN_HOP=512, SCAN_SEG_SEC=20, SCAN_DETECT_DB=-42;
   const SCAN_PLAN=(()=>{
@@ -1257,6 +1565,7 @@ $('#btnSetTempo').onclick=()=>{
     ['basic','scan','drums','scaler'].forEach(x=>{ const el=$('#stem'+x.charAt(0).toUpperCase()+x.slice(1)); if(el) el.hidden=x!==k; });
   }
   async function scanRun(mode,opts){
+    if(mode==='scan'&&aiEngine()==='ai') return scanRunAI(opts);
     const picked=pickClipForAnalysis();
     if(!picked){
       scanStatus('Import an audio clip first — Scan needs real audio from a clip.');
@@ -1357,7 +1666,7 @@ $('#btnSetTempo').onclick=()=>{
     commit:scanCommitPreview,discard:scanDiscardPreview,preview:()=>scanPreview,
     wavBlob:scanBufferToWavBlob,rmsDb:scanRmsDb,energy:scanEnergy,
     startAudition:scanStartAudition,stopAudition:scanStopAudition,applyGains:scanApplyAuditionGains,
-    auditionState:()=>scanAudition};
+    auditionState:()=>scanAudition,engine:aiEngine};
 
 window.__reaTempo={detectTempo,tempoEnvelope: tempoEnvelopeFull,tempoEnvelopeFull,tempoEnvelopeWindow,pickClipForAnalysis,tempoResultHTML,runAnalyse:()=>$('#btnAnalyse').onclick()};
 const padNames=['Kick','Snare','Hat','Clap','Tom','Perc','Crash','FX']; $('#pads').innerHTML=padNames.map((n,i)=>'<button class="pad" data-pad="'+n+'">'+n+'<br><small>'+(i+1)+'</small></button>').join(''); $$('[data-pad]').forEach(b=>b.onclick=()=>drum(b.dataset.pad));
