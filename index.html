@@ -677,10 +677,9 @@ $$('[data-view]').forEach(b=>b.onclick=()=>switchView(b.dataset.view));
 $$('[data-stem]').forEach(b=>b.onclick=()=>{ $$('[data-stem]').forEach(x=>x.classList.toggle('on',x===b)); ['basic','scan','drums','scaler'].forEach(k=>{ $('#stem'+k.charAt(0).toUpperCase()+k.slice(1)).hidden=k!==b.dataset.stem; }); });
 function runProgress(label,done){ let p=0; $('#progTxt').textContent=label; const iv=setInterval(()=>{p+=10; $('#prog').value=p; if(p>=100){clearInterval(iv); $('#progTxt').textContent=label+' — done. New tracks added to Arrange.'; done&&done(); save(true); render();}},180); }
 // Basic / Scan / Drums buttons are wired to the real spectral preview engine below.
-// ---- Real tempo detector (lane 3): pure JS, no libraries / WASM / network ----
-// 60 s cap -> mono -> 1024-pt radix-2 FFT positive spectral flux (hop 512)
-// -> normalised autocorrelation for 40-200 BPM -> octave-aware peak pick.
-const TEMPO_CAP_SEC=60, TEMPO_HOP=512, TEMPO_FFT=1024, TEMPO_MIN_BPM=40, TEMPO_MAX_BPM=200, TEMPO_OCTAVE_TOL=0.04;
+// ---- Real tempo detector (lane 8): 30s listen window + beat counting ----
+const TEMPO_HOP=512, TEMPO_FFT=1024, TEMPO_MIN_BPM=40, TEMPO_MAX_BPM=200, TEMPO_OCTAVE_TOL=0.04;
+const TEMPO_WIN_SEC=30, TEMPO_WIN_STEP_SEC=5;
 function tempoNow(){ try{ return (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now(); }catch(e){ return Date.now(); } }
 function tempoFFT(re,im){
   const n=re.length;
@@ -697,9 +696,9 @@ function tempoFFT(re,im){
     }
   }
 }
-function tempoEnvelope(buffer){
+function tempoEnvelopeFull(buffer){
   const sr=buffer.sampleRate, N=TEMPO_FFT, half=N>>1;
-  const n=Math.min(buffer.length, Math.floor(sr*TEMPO_CAP_SEC));
+  const n=buffer.length;
   const frames=Math.max(0, Math.floor((n-N)/TEMPO_HOP)+1);
   const env=new Float32Array(frames), re=new Float64Array(N), im=new Float64Array(N);
   const win=new Float64Array(N); for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
@@ -713,7 +712,37 @@ function tempoEnvelope(buffer){
     if(f>0){ let flux=0; for(let k=1;k<half;k++) flux+=Math.max(0,cur[k]-prev[k]); env[f]=flux/half; }
     const swap=prev; prev=cur; cur=swap;
   }
-  // local-mean subtraction + half-wave rectify keeps onsets, drops slow level drift
+  const W=Math.max(3,Math.round(sr/TEMPO_HOP)), out=new Float32Array(frames);
+  let sum=0;
+  for(let i=0;i<frames;i++){
+    if(i<W) sum+=env[i]; else sum+=env[i]-env[i-W];
+    const mean=sum/Math.min(W,i+1);
+    out[i]=Math.max(0,env[i]-mean);
+  }
+  let max=0; for(let i=0;i<frames;i++) if(out[i]>max) max=out[i];
+  if(max>0) for(let i=0;i<frames;i++) out[i]/=max;
+  return out;
+}
+// compute envelope for a time window [startSec, endSec) of buffer
+function tempoEnvelopeWindow(buffer, startSec, endSec){
+  const sr=buffer.sampleRate, N=TEMPO_FFT, half=N>>1;
+  const startSample=Math.max(0, Math.floor(startSec*sr));
+  const endSample=Math.min(buffer.length, Math.ceil(endSec*sr));
+  const n=endSample-startSample;
+  const frames=Math.max(0, Math.floor((n-N)/TEMPO_HOP)+1);
+  const env=new Float32Array(frames), re=new Float64Array(N), im=new Float64Array(N);
+  const win=new Float64Array(N); for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
+  const chans=[]; for(let c=0;c<Math.min(2,buffer.numberOfChannels||1);c++) chans.push(buffer.getChannelData(c));
+  let prev=new Float64Array(half), cur=new Float64Array(half);
+  for(let f=0;f<frames;f++){
+    const off=startSample + f*TEMPO_HOP;
+    const nc=chans.length;
+    for(let i=0;i<N;i++){ let s=0; for(let c=0;c<nc;c++) s+=(chans[c][off+i]||0); re[i]=s/nc*win[i]; im[i]=0; }
+    tempoFFT(re,im);
+    for(let k=0;k<half;k++) cur[k]=Math.sqrt(re[k]*re[k]+im[k]*im[k]);
+    if(f>0){ let flux=0; for(let k=1;k<half;k++) flux+=Math.max(0,cur[k]-prev[k]); env[f]=flux/half; }
+    const swap=prev; prev=cur; cur=swap;
+  }
   const W=Math.max(3,Math.round(sr/TEMPO_HOP)), out=new Float32Array(frames);
   let sum=0;
   for(let i=0;i<frames;i++){
@@ -746,9 +775,45 @@ function tempoRefine(ac,L){
 }
 function detectTempo(buffer,clipName){
   const t0=tempoNow(), sr=buffer.sampleRate, hop=TEMPO_HOP, name=clipName||'audio clip';
-  const duration=buffer?Math.min((buffer.duration||buffer.length/sr),TEMPO_CAP_SEC):0;
-  if(!buffer || buffer.length<sr*0.25) return {bpm:null,clear:false,clipName:name,clipDuration:duration,analysedSeconds:duration,rawBpm:null,alternatives:[],confidence:0,peak:0,chosenPeak:0,runnerUp:0,octaveRunnerUp:0,rawRunnerUp:0,frames:0,onsetFrames:0,runtimeMs:0,note:'clip too short',rejectReason:'the clip is shorter than 0.25 s'};
-  const env=tempoEnvelope(buffer), M=env.length;
+  const clipDuration=buffer?(buffer.duration||buffer.length/sr):0;
+  if(!buffer || buffer.length<sr*0.25) return {bpm:null,clear:false,clipName:name,clipDuration:clipDuration,analysedSeconds:clipDuration,rawBpm:null,alternatives:[],confidence:0,peak:0,chosenPeak:0,runnerUp:0,octaveRunnerUp:0,rawRunnerUp:0,frames:0,onsetFrames:0,runtimeMs:0,note:'clip too short',rejectReason:'the clip is shorter than 0.25 s',windowStartSec:0,windowSec:clipDuration,beatsCounted:0};
+  // compute full envelope for window scoring
+  const fullEnv=tempoEnvelopeFull(buffer);
+  const fullFrames=fullEnv.length;
+  let winStartSec=0, winSec=clipDuration;
+  let windowScores=[];
+  if(clipDuration > TEMPO_WIN_SEC+1e-6){
+    // slide windows of 30s in 5s steps across whole clip
+    const step=TEMPO_WIN_STEP_SEC;
+    let bestScore=-1, bestStart=0;
+    for(let ws=0; ws+TEMPO_WIN_SEC<=clipDuration+1e-9; ws+=step){
+      const we=Math.min(ws+TEMPO_WIN_SEC, clipDuration);
+      const f0=Math.max(0, Math.floor(ws*sr/hop));
+      const f1=Math.min(fullFrames, Math.ceil(we*sr/hop));
+      let sc=0; for(let i=f0;i<f1;i++) sc+=fullEnv[i];
+      windowScores.push({start:Math.round(ws*10)/10,score:sc});
+      if(sc>bestScore){ bestScore=sc; bestStart=ws; }
+    }
+    // also consider final window ending at clipDuration if not aligned
+    const lastStart=Math.max(0, clipDuration-TEMPO_WIN_SEC);
+    if(windowScores.length===0 || Math.abs(windowScores[windowScores.length-1].start-lastStart)>0.01){
+      const ws=lastStart, we=clipDuration;
+      const f0=Math.max(0, Math.floor(ws*sr/hop));
+      const f1=Math.min(fullFrames, Math.ceil(we*sr/hop));
+      let sc=0; for(let i=f0;i<f1;i++) sc+=fullEnv[i];
+      windowScores.push({start:Math.round(ws*10)/10,score:sc});
+      if(sc>bestScore){ bestScore=sc; bestStart=ws; }
+    }
+    winStartSec=bestStart; winSec=TEMPO_WIN_SEC;
+  } else {
+    winStartSec=0; winSec=clipDuration;
+  }
+  // pick top-3 window scores for audit
+  windowScores.sort((a,b)=>b.score-a.score);
+  const topWindowScores=windowScores.slice(0,3);
+  // compute envelope for chosen window
+  const env=tempoEnvelopeWindow(buffer, winStartSec, winStartSec+winSec);
+  const M=env.length;
   const {ac,minLag,maxLag}=tempoAutocorr(env,sr,hop);
   let bestL=minLag,best=ac[minLag];
   for(let L=minLag;L<=maxLag;L++) if(ac[L]>best){ best=ac[L]; bestL=L; }
@@ -756,7 +821,6 @@ function detectTempo(buffer,clipName){
   for(let L=minLag;L<=maxLag;L++) if(Math.abs(L-bestL)>2 && ac[L]>=ac[L-1] && ac[L]>=ac[L+1] && ac[L]>rawRunner) rawRunner=ac[L];
   const Lf=tempoRefine(ac,bestL), rawBpm=sr*60/(hop*Lf);
   const acAt=L=>{ const l0=Math.floor(L),fr=L-l0; return (ac[l0]||0)*(1-fr)+(ac[l0+1]||0)*fr; };
-  // Octave family: report each halving/doubling that stays inside 40-200 BPM.
   const cands=[{rel:'raw',bpm:rawBpm,lag:Lf,ac:acAt(Lf)}];
   for(let k=1;k<=4;k++){
     const mult=Math.pow(2,k), up=rawBpm*mult, ul=Lf/mult;
@@ -764,11 +828,6 @@ function detectTempo(buffer,clipName){
     const dn=rawBpm/mult, dl=Lf*mult;
     if(dn>=TEMPO_MIN_BPM&&dl<=maxLag) cands.push({rel:'÷'+mult,bpm:dn,lag:dl,ac:acAt(dl)});
   }
-  // Every local AC peak in the useful 68-162 BPM band is a candidate, not just
-  // octaves of the raw best. The 85 BPM conductor fixture's raw best is a
-  // 1.5-beat lag (56.7 BPM) whose ×2 octave is 113 BPM; the true 85 BPM peak is
-  // a separate local maximum. Raw/octave candidates stay in the alternatives
-  // list so the ½× / 2× buttons keep their old behaviour.
   const peaks=[];
   for(let L=minLag;L<=maxLag;L++) if(ac[L]>=ac[L-1]&&ac[L]>=ac[L+1]){
     const lf=tempoRefine(ac,L), bpm=sr*60/(hop*lf);
@@ -781,22 +840,12 @@ function detectTempo(buffer,clipName){
   let inBand=cands.concat(peaks).filter(c=>c.bpm>=68&&c.bpm<=162).sort((a,b)=>b.ac-a.ac);
   if(inBand.length){
     chosen=inBand[0];
-    // 3:2 metrical disambiguation: at some sample rates (e.g. 48 kHz) a
-    // 2/3-time (dotted-beat) lag can have higher AC than the true beat even
-    // though the beat peak is strong and clear. If the top candidate has a
-    // 3/2-time partner with comparable strength, prefer the faster (beat) level.
     const partner=inBand.find(c=>c!==chosen && Math.abs(c.bpm/chosen.bpm-1.5)<=0.04 && c.ac>=0.65*chosen.ac && c.ac>=0.5);
     if(partner) chosen=partner;
   }
   let spike=0; for(let i=0;i<M;i++) if(env[i]>=0.25) spike++;
   const r1=x=>Math.round(x*10)/10, r2=x=>Math.round(x*100)/100, r3=x=>Math.round(x*1000)/1000;
   const chosenPeak=acAt(chosen.lag);
-  // Band statistics for prominence gating. Highly periodic drum patterns can
-  // produce several strong metrical lags (e.g. a 2.5-beat lag at 48 kHz), so a
-  // peak-vs-single-runner ratio rejects correct periodicities. Instead accept a
-  // tempo when the chosen peak is absolutely strong and stands out from the
-  // band background (median AC), plus the onset-density and >=3-period gates
-  // which reject tone (few/no onsets, too few periods) and noise (weak peak).
   const bandVals=[];
   for(let L=minLag;L<=maxLag;L++) bandVals.push(ac[L]);
   bandVals.sort((a,b)=>a-b);
@@ -804,11 +853,7 @@ function detectTempo(buffer,clipName){
   let bandAbsSum=0; for(let i=0;i<bandVals.length;i++) bandAbsSum+=Math.abs(bandVals[i]);
   const bandMeanAbs=bandAbsSum/(bandVals.length||1);
   const prominence=chosenPeak-bandMedian;
-  // Relative confidence: prominence of the chosen peak over the average
-  // absolute AC level of the band (a ratio, never a fake percentage).
   const rel=chosenPeak/Math.max(0.01,bandMeanAbs);
-  // Keep raw/octave/family runner-ups reported for diagnostics and ½×/2×
-  // alternatives, but do not gate on a single competing peak.
   const OCT_RATIOS=[0.25,0.5,1,2,4], GRID_RATIOS=[0.25,1/3,0.5,2/3,1,1.5,2,3,4];
   const inRatios=(a,b,ratios)=>{ const q=a/b; return ratios.some(k=>Math.abs(q-k)<=TEMPO_OCTAVE_TOL*k); };
   const lagsFor=ratios=>ratios.map(k=>chosen.lag*k).concat(inRatios(Lf,chosen.lag,ratios)?[Lf]:[]);
@@ -819,7 +864,6 @@ function detectTempo(buffer,clipName){
     if(!near(L,octLags)&&ac[L]>octaveRunner) octaveRunner=ac[L];
     if(!near(L,gridLags)&&ac[L]>runner) runner=ac[L];
   }
-  // Name every gate that actually failed.
   const reasons=[];
   if(best<0.16) reasons.push('the autocorrelation peak is too weak ('+r3(best)+' < 0.16)');
   if(chosenPeak<0.25) reasons.push('the chosen tempo peak is too weak ('+r3(chosenPeak)+' < 0.25)');
@@ -827,13 +871,38 @@ function detectTempo(buffer,clipName){
   if(spike<6) reasons.push('too few onset frames ('+spike+' in '+M+' analysed; 6 needed)');
   if(M<chosen.lag*3) reasons.push('too few periods for the chosen lag ('+M+' frames < '+Math.ceil(chosen.lag*3)+')');
   const clear=reasons.length===0;
+  // beat counting
+  let beatsCounted=0;
+  if(M>0 && chosen.lag>0){
+    const periodFrames=chosen.lag;
+    let bestPhase=0, bestPhaseScore=-1;
+    const phaseMax=Math.min(Math.ceil(periodFrames), M);
+    for(let ph=0; ph<phaseMax; ph++){
+      let sc=0;
+      for(let bi=0; ; bi++){
+        const fi = ph + bi*periodFrames;
+        if(fi>=M) break;
+        sc += env[fi]||0;
+      }
+      if(sc>bestPhaseScore){ bestPhaseScore=sc; bestPhase=ph; }
+    }
+    // count grid positions in window (all beats in the full window grid)
+    beatsCounted = Math.floor((M-1-bestPhase)/periodFrames)+1;
+    if(beatsCounted<0) beatsCounted=0;
+  }
+  const impliedBpm = (winSec>0 && beatsCounted>0) ? (beatsCounted * 60.0 / winSec) : null;
   return {
     bpm:clear?r1(chosen.bpm):null, rawBpm:r1(rawBpm), chosenRelation:chosen.rel,
     alternatives:cands.filter(c=>c!==chosen).map(c=>({bpm:r1(c.bpm),relation:c.rel,ac:r3(c.ac),rejected:true})),
     confidence:r2(rel), peak:r3(best), chosenPeak:r3(chosenPeak), runnerUp:r3(runner), octaveRunnerUp:r3(octaveRunner), rawRunnerUp:r3(rawRunner),
     bandMedian:r3(bandMedian), bandMeanAbs:r3(bandMeanAbs), prominence:r3(prominence),
-    clear,rejectReason:reasons.join('; '),clipName:name,clipDuration:duration,analysedSeconds:duration,frames:M,onsetFrames:spike,
-    runtimeMs:Math.round((tempoNow()-t0)*10)/10
+    clear,rejectReason:reasons.join('; '),clipName:name,clipDuration:clipDuration,analysedSeconds:winSec,frames:M,onsetFrames:spike,
+    runtimeMs:Math.round((tempoNow()-t0)*10)/10,
+    windowStartSec: Math.round(winStartSec*100)/100,
+    windowSec: Math.round(winSec*100)/100,
+    beatsCounted: beatsCounted,
+    impliedBpmFromBeats: impliedBpm? Math.round(impliedBpm*10)/10 : null,
+    topWindowScores: topWindowScores.map(w=>({startSec:w.start, score: Math.round(w.score*1000)/1000}))
   };
 }
 function pickClipForAnalysis(){
@@ -844,12 +913,28 @@ function pickClipForAnalysis(){
   return null;
 }
 function tempoEsc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function tempoFmtTime(sec){
+  sec = Math.max(0, sec||0);
+  const m = Math.floor(sec/60);
+  const s = Math.floor(sec%60);
+  return m+':'+(s<10?'0':'')+s;
+}
 function tempoResultHTML(r){
   if(!r) return 'No analysis yet — import an audio clip, then Analyse.';
   if(!r.clear) return 'No clear tempo in <b>'+tempoEsc(r.clipName)+'</b> ('+r.clipDuration.toFixed(1)+' s) — '+(r.rejectReason||'the detector found no reliable beat')+'.<br><span class="muted">Gate numbers: AC peak '+r.peak.toFixed(2)+', chosen-peak AC '+r.chosenPeak.toFixed(2)+', prominence '+(r.prominence!=null?r.prominence.toFixed(2):'?')+' above band median '+(r.bandMedian!=null?r.bandMedian.toFixed(2):'?')+', prominence ratio '+r.confidence.toFixed(2)+'× band mean |AC|, next non-family peak '+r.runnerUp.toFixed(2)+', '+r.onsetFrames+' onset frames in '+r.frames+' analysed.</span><br><span class="muted">Key/chord detection is desktop-only for now.</span>';
   const alts=r.alternatives.length?'; rejected: '+r.alternatives.map(a=>a.bpm.toFixed(1)+' BPM ('+a.relation+')').join(', '):'';
-  return '<b>Tempo:</b> '+r.bpm.toFixed(1)+' BPM <span class="muted">(relative confidence '+r.confidence.toFixed(2)+'× band mean |AC|, chosen AC peak '+r.chosenPeak.toFixed(2)+', prominence '+(r.prominence!=null?r.prominence.toFixed(2):'?')+' above band median '+(r.bandMedian!=null?r.bandMedian.toFixed(2):'?')+'; raw AC peak '+r.peak.toFixed(2)+', next non-family peak '+r.runnerUp.toFixed(2)+')</span><br>'+
-    '<b>Clip:</b> '+tempoEsc(r.clipName)+' — '+r.clipDuration.toFixed(1)+' s (first '+r.analysedSeconds.toFixed(1)+' s analysed)<br>'+
+  const ws = (typeof r.windowStartSec==='number')? r.windowStartSec : 0;
+  const wsec = (typeof r.windowSec==='number')? r.windowSec : (r.analysedSeconds||0);
+  const we = ws + wsec;
+  let listenLine = 'Listened to '+tempoFmtTime(ws)+'-'+tempoFmtTime(we)+' ('+Math.round(wsec)+' s window) - counted '+(r.beatsCounted||0)+' beats - '+(r.bpm!=null?r.bpm.toFixed(1):'?')+' BPM';
+  if(r.bpm!=null && r.impliedBpmFromBeats!=null){
+    const diffPct = Math.abs(r.impliedBpmFromBeats - r.bpm) / r.bpm * 100;
+    if(diffPct > 3.0){
+      listenLine += ' (beat count suggests ~'+r.impliedBpmFromBeats.toFixed(1)+' BPM)';
+    }
+  }
+  return '<b>Tempo:</b> '+(r.bpm!=null?r.bpm.toFixed(1):'?')+' BPM <span class="muted">(relative confidence '+r.confidence.toFixed(2)+'× band mean |AC|, chosen AC peak '+r.chosenPeak.toFixed(2)+', prominence '+(r.prominence!=null?r.prominence.toFixed(2):'?')+' above band median '+(r.bandMedian!=null?r.bandMedian.toFixed(2):'?')+'; raw AC peak '+r.peak.toFixed(2)+', next non-family peak '+r.runnerUp.toFixed(2)+')</span><br>'+
+    '<b>'+tempoEsc(r.clipName)+'</b> — '+r.clipDuration.toFixed(1)+' s total. '+listenLine+'<br>'+
     '<span class="muted">Raw autocorrelation best: '+r.rawBpm.toFixed(1)+' BPM'+alts+'. Use ½× / 2× if the octave is wrong.</span><br>'+
     '<span class="muted">Key/chord detection is desktop-only for now.</span>';
 }
@@ -1274,7 +1359,7 @@ $('#btnSetTempo').onclick=()=>{
     startAudition:scanStartAudition,stopAudition:scanStopAudition,applyGains:scanApplyAuditionGains,
     auditionState:()=>scanAudition};
 
-window.__reaTempo={detectTempo,tempoEnvelope,pickClipForAnalysis,tempoResultHTML,runAnalyse:()=>$('#btnAnalyse').onclick()};
+window.__reaTempo={detectTempo,tempoEnvelope: tempoEnvelopeFull,tempoEnvelopeFull,tempoEnvelopeWindow,pickClipForAnalysis,tempoResultHTML,runAnalyse:()=>$('#btnAnalyse').onclick()};
 const padNames=['Kick','Snare','Hat','Clap','Tom','Perc','Crash','FX']; $('#pads').innerHTML=padNames.map((n,i)=>'<button class="pad" data-pad="'+n+'">'+n+'<br><small>'+(i+1)+'</small></button>').join(''); $$('[data-pad]').forEach(b=>b.onclick=()=>drum(b.dataset.pad));
 loadAutosave(); render(); audioRestorePromise=restoreAudioFromIDB();
 (function(){ const tl=document.getElementById('timeline'); if(!tl) return; tl.addEventListener('dragover', e=>{ e.preventDefault(); }); tl.addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if(f) handleAnyImport(f, null); }); })();
