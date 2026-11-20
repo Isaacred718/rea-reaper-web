@@ -118,8 +118,9 @@ footer{padding:18px 14px 30px;color:var(--dim);font-size:13px;line-height:1.6}
     <div id="trackList"></div>
     <div class="row"><select id="newTrackType"><option>Audio</option><option>MIDI</option><option>Drums</option><option>Bass</option><option>Vocals</option><option>Synth</option></select><button class="btn primary" id="btnAddTrack">+ Add Track</button></div>
     <h3>Projects in local storage</h3><ul class="list" id="projList"></ul>
-    <h3>Import audio</h3><p class="muted">Drop an audio file to create a track. The file plays in this session; its name and settings are saved, the audio data itself stays on your device.</p>
-    <input type="file" id="audioImport" accept="audio/*" class="field" style="width:100%">
+    <h3>Import audio</h3><p class="muted">Choose a WAV or other audio file, or drag and drop it onto the timeline. It decodes in your browser, no upload.</p>
+    <input type="file" id="audioImport" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.aif,.aiff" class="field" style="width:100%">
+    <p id="importStatus" class="muted" style="border:1px solid var(--line);border-radius:10px;padding:9px;margin-top:8px">Import a WAV, MP3, M4A or FLAC: it will be decoded, drawn as a waveform, placed on a new track at bar 1, and played by the transport Play button. The file is stored in this browser in IndexedDB so it reloads with the project.</p>
     <div class="notice" style="margin-top:12px"><b>Use anywhere:</b> this page is a single static file. Put it on GitHub Pages and open it on phone, laptop, or Quest browser. Projects live in that browser's local storage, export .rea.json to move them.</div>
   </section>
 
@@ -181,7 +182,7 @@ function render(){ $('#trackList').innerHTML=state.tracks.map((t,i)=>'<div class
  $('#lanes').querySelectorAll('.lane')?.forEach(e=>e.remove());
  // ruler
  $('#ruler').innerHTML=Array.from({length:16},(_,i)=>'<div>Bar '+(i+1)+'</div>').join('');
- state.tracks.forEach((t,ti)=>{ const lane=document.createElement('div'); lane.className='lane'; lane.onclick=()=>{state.selectedTrack=ti;render()}; t.clips.forEach(c=>{ const el=document.createElement('div'); el.className='clip'; el.style.left=(12+c.start*80)+'px'; el.style.width=(c.len*80-8)+'px'; el.style.background=t.color; el.textContent=c.name+' • '+t.name; el.draggable=true; el.ondragstart=e=>{e.dataTransfer.setData('text/plain',JSON.stringify({ti,ci:c.id}))}; el.onclick=e=>{e.stopPropagation();state.selectedTrack=ti;state.selectedClip=c.id;render()}; lane.appendChild(el)}); $('#lanes').appendChild(lane); });
+ state.tracks.forEach((t,ti)=>{ const lane=document.createElement('div'); lane.className='lane'; lane.onclick=()=>{state.selectedTrack=ti;render()}; t.clips.forEach(c=>{ const el=document.createElement('div'); el.className='clip'; el.style.left=(12+c.start*80)+'px'; el.style.width=(c.len*80-8)+'px'; el.style.background=t.color; el.textContent=c.name+' • '+t.name; if(c.peaks && c.peaks.length){ const cv=document.createElement('canvas'); cv.width=Math.max(60,(c.len||1)*70); cv.height=20; cv.style.cssText='display:block;width:100%;height:20px;margin-top:2px'; const cx=cv.getContext('2d'); cx.fillStyle='rgba(0,0,0,.6)'; const w=cv.width,h=cv.height; c.peaks.forEach((pk,i)=>{ const x=(i/c.peaks.length)*w; const bh=Math.max(1,pk*h); cx.fillRect(x,(h-bh)/2,Math.max(1,w/c.peaks.length-1),bh); }); el.appendChild(cv); } if(c.duration){ const sm=document.createElement('small'); sm.textContent=' '+c.duration.toFixed(1)+'s — press Play'; el.appendChild(sm); } el.draggable=true; el.ondragstart=e=>{e.dataTransfer.setData('text/plain',JSON.stringify({ti,ci:c.id}))}; el.onclick=e=>{e.stopPropagation();state.selectedTrack=ti;state.selectedClip=c.id;render()}; lane.appendChild(el)}); $('#lanes').appendChild(lane); });
  $('#mixer').innerHTML=state.tracks.map((t,i)=>'<div class="strip"><b>'+t.name+'</b><br><span class="muted">'+t.type+'</span><br><input type="range" min="0" max="100" value="'+t.vol+'" data-vol="'+i+'"><div>'+t.vol+'%</div><button class="btn" data-act="mute" data-i="'+i+'">M</button></div>').join('');
  $('#markerList').innerHTML=(state.markers||[]).map(m=>'<li><span>'+m+'</span></li>').join('')||'<li><span class="muted">No markers yet</span></li>';
  renderPiano(); renderProjects(); bindTrackControls(); }
@@ -189,14 +190,58 @@ function bindTrackControls(){ $$('[data-vol]').forEach(el=>el.oninput=()=>{state
 function renderProjects(){ let p={}; try{p=JSON.parse(localStorage.getItem('rea.projects.v1')||'{}')}catch(e){} $('#projList').innerHTML=Object.keys(p).map(k=>'<li><span>'+k+'</span><span><button class="btn" onclick="loadProj(\''+k.replace(/'/g,"\\'")+'\')">Load</button> <button class="btn" onclick="delProj(\''+k.replace(/'/g,"\\'")+'\')">Del</button></span></li>').join('')||'<li class="muted">No saved projects yet</li>'; }
 window.loadProj=k=>{let p=JSON.parse(localStorage.getItem('rea.projects.v1')||'{}'); if(p[k]){state=p[k]; $('#projName').value=state.name; $('#bpm').value=state.bpm; render();}}; window.delProj=k=>{let p=JSON.parse(localStorage.getItem('rea.projects.v1')||'{}'); delete p[k]; localStorage.setItem('rea.projects.v1',JSON.stringify(p)); renderProjects();};
 function renderPiano(){ const notes=['C4','D4','E4','F4','G4','A4','B4','C5']; $('#pianoGrid').innerHTML=state.notes.map((n,i)=>'<button class="'+(n?'on':'')+'" data-step="'+i+'">'+(n||(i+1))+'</button>').join(''); $$('#pianoGrid button').forEach(b=>b.onclick=()=>{const i=+b.dataset.step; state.notes[i]=state.notes[i]?null:notes[i%notes.length]; if(state.notes[i]) tone(261.63*Math.pow(2,[0,2,4,5,7,9,11,12][i%8]/12),0.3,'triangle',0.2); save(true); renderPiano();}); }
+
+// ---- Real audio import engine (v2 fix, 2026-11-20) ----
+const audioBuffers = {}; const audioSources = [];
+window.__reaAudioBuffers = audioBuffers;
+function importStatus(msg, isErr){ const el=document.getElementById('importStatus'); if(el){ el.textContent=msg; el.style.borderColor=isErr?'#e94f37':'var(--gold)'; el.style.color=isErr?'#ffb3a7':''; } const pt=document.getElementById('progTxt'); if(pt) pt.textContent=msg; }
+function idbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open('rea-audio-db',1); r.onupgradeneeded=()=>{ if(!r.result.objectStoreNames.contains('files')) r.result.createObjectStore('files'); }; r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
+async function idbPut(id, blob){ try{ const db=await idbOpen(); return await new Promise((res,rej)=>{ const tx=db.transaction('files','readwrite'); tx.objectStore('files').put(blob,id); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); }); }catch(e){ return false; } }
+async function idbGet(id){ try{ const db=await idbOpen(); return await new Promise((res,rej)=>{ const rq=db.transaction('files','readonly').objectStore('files').get(id); rq.onsuccess=()=>res(rq.result||null); rq.onerror=()=>rej(rq.error); }); }catch(e){ return null; } }
+function computePeaks(buffer, n){ n=n||120; const data=buffer.getChannelData(0); const block=Math.max(1, Math.floor(data.length/n)); const peaks=[]; for(let i=0;i<n;i++){ let max=0; const start=i*block; for(let j=0;j<block;j+=Math.max(1,Math.floor(block/32))){ const v=Math.abs(data[start+j]||0); if(v>max) max=v; } peaks.push(Math.round(max*100)/100); } return peaks; }
+async function decodeAudioFile(file){ const ab=await file.arrayBuffer(); const ctx=ac(); try{ return await ctx.decodeAudioData(ab.slice(0)); }catch(e){ return await new Promise((res,rej)=>{ ac().decodeAudioData(ab.slice(0), res, rej); }); } }
+async function importAudioFile(file){
+  if(!file) return;
+  importStatus('Importing '+file.name+' — decoding…');
+  try{
+    const buffer=await decodeAudioFile(file);
+    const clipId='a'+Date.now()+'-'+Math.floor(Math.random()*9999);
+    audioBuffers[clipId]=buffer;
+    const stored=await idbPut(clipId, file);
+    const secPerBar=(60/state.bpm)*4;
+    const lenBars=Math.max(1, Math.ceil(buffer.duration/secPerBar));
+    const color=COLORS[state.tracks.length%COLORS.length];
+    const clip={id:clipId, audioId:clipId, name:file.name, start:0, len:lenBars, duration:Math.round(buffer.duration*100)/100, peaks:computePeaks(buffer), color:color};
+    state.tracks.push({id:Date.now(), name:file.name.replace(/\.[^.]+$/,''), type:'Audio', color:color, vol:80, pan:0, mute:false, solo:false, clips:[clip]});
+    state.selectedTrack=state.tracks.length-1;
+    save(true); render();
+    importStatus('Imported '+file.name+' — '+buffer.duration.toFixed(1)+'s, '+buffer.numberOfChannels+' ch, '+(buffer.sampleRate/1000)+' kHz. Press Play and it plays on its track.'+(stored?' Saved in this browser (IndexedDB) so it reloads.':' Note: browser storage was unavailable, so this import is session-only.'));
+  }catch(err){
+    console.error('REA import failed', err);
+    importStatus('Could not decode '+file.name+'. Try a standard WAV (PCM 16/24-bit), MP3 or M4A. Error: '+(err && err.message ? err.message : err), true);
+  }
+}
+async function handleAnyImport(file, inputEl){
+  if(inputEl) inputEl.value='';
+  if(!file) return;
+  const name=(file.name||'').toLowerCase();
+  if(name.endsWith('.json') || file.type==='application/json'){ const t=await file.text(); try{ state=JSON.parse(t); save(true); render(); importStatus('Project imported from '+file.name); }catch(e){ importStatus('That JSON file could not be read as a REA project.', true); } return; }
+  // WAV from iOS Files often arrives with an empty or generic type, so trust the extension as well as the MIME type
+  if(file.type.startsWith('audio/') || /\.(wav|mp3|m4a|ogg|oga|flac|aif|aiff|aac|opus|webm)$/.test(name) || file.type===''){ await importAudioFile(file); return; }
+  importStatus('That file type is not supported for import: '+(file.type||'unknown')+' — use WAV, MP3, M4A, FLAC or a .rea.json project.', true);
+}
+function scheduleAudio(){ stopAudioSources(); const ctx=ac(); const secPerBar=(60/state.bpm)*4; const hasSolo=state.tracks.some(t=>t.solo); state.tracks.forEach(t=>{ if(t.mute) return; if(hasSolo && !t.solo) return; (t.clips||[]).forEach(c=>{ const buf=c.audioId && audioBuffers[c.audioId]; if(!buf) return; const src=ctx.createBufferSource(); src.buffer=buf; const g=ctx.createGain(); g.gain.value=((t.vol==null?80:t.vol)/100); if(ctx.createStereoPanner){ const pn=ctx.createStereoPanner(); pn.pan.value=((t.pan||0)/100); g.connect(pn); pn.connect(ctx.destination); } else { g.connect(ctx.destination); } src.connect(g); src.start(ctx.currentTime+0.08+((c.start||0)*secPerBar)); audioSources.push(src); }); }); }
+function stopAudioSources(){ audioSources.forEach(src=>{ try{ src.stop(); }catch(e){} }); audioSources.length=0; }
+async function restoreAudioFromIDB(){ let restored=0, missing=0; for(const t of state.tracks){ for(const c of (t.clips||[])){ if(c.audioId && !audioBuffers[c.audioId]){ const blob=await idbGet(c.audioId); if(blob){ try{ audioBuffers[c.audioId]=await decodeAudioFile(blob); restored++; }catch(e){ missing++; } } else if(c.audioId){ missing++; } } } } if(restored){ render(); importStatus('Reloaded '+restored+' imported audio file(s) from this browser storage. Press Play.'); } else if(missing){ importStatus(missing+' audio clip(s) are in the project but their files are not in this browser (they were imported on another device/browser). Re-import the WAV to hear them here.', true); } }
+// ---- end audio engine ----
 let playTimer=null,step=0;
-function setPlay(on){ state.playing=on; $('#btnPlay').textContent=on?'⏸':'▶'; if(on){ ac(); playTimer=setInterval(()=>{ step=(step+1)%64; const beat=step/4; $('#playhead').style.left=(12+beat*80)+'px'; $('#timeDisp').textContent=(Math.floor(beat/4)+1)+'.'+(Math.floor(beat%4)+1)+'.'+String(step%4*25).padStart(2,'0'); $('#secDisp').textContent=(beat*60/state.bpm).toFixed(2)+'s • '+state.bpm+' BPM • '+state.sig; if($('#metroChk').checked && step%4===0) tone(880,0.06,'square',0.08); if(step%16===0){ const t=state.tracks[state.selectedTrack]; } if(state.notes[step%16]){ const idx=[0,2,4,5,7,9,11,12][step%8]; tone(261.63*Math.pow(2,idx/12),0.22,'triangle',0.14);} if(step%8===0) drum('Kick'); if(step%8===4) drum('Snare'); }, 60000/state.bpm/4); } else { clearInterval(playTimer);} }
+function setPlay(on){ state.playing=on; if(on){ try{ scheduleAudio(); }catch(e){ console.error(e); } } else { stopAudioSources(); } $('#btnPlay').textContent=on?'⏸':'▶'; if(on){ ac(); playTimer=setInterval(()=>{ step=(step+1)%64; const beat=step/4; $('#playhead').style.left=(12+beat*80)+'px'; $('#timeDisp').textContent=(Math.floor(beat/4)+1)+'.'+(Math.floor(beat%4)+1)+'.'+String(step%4*25).padStart(2,'0'); $('#secDisp').textContent=(beat*60/state.bpm).toFixed(2)+'s • '+state.bpm+' BPM • '+state.sig; if($('#metroChk').checked && step%4===0) tone(880,0.06,'square',0.08); if(step%16===0){ const t=state.tracks[state.selectedTrack]; } if(state.notes[step%16]){ const idx=[0,2,4,5,7,9,11,12][step%8]; tone(261.63*Math.pow(2,idx/12),0.22,'triangle',0.14);} if(step%8===0) drum('Kick'); if(step%8===4) drum('Snare'); }, 60000/state.bpm/4); } else { clearInterval(playTimer);} }
 $('#btnPlay').onclick=()=>setPlay(!state.playing); $('#btnStop').onclick=()=>{setPlay(false); step=0; $('#playhead').style.left='12px'}; $('#btnRew').onclick=()=>{step=0}; $('#btnRec').onclick=e=>{e.target.classList.toggle('active'); alert('Record armed on selected track. In web REA, use Piano Roll / Drum Pads to write, or import audio.')};
 document.addEventListener('keydown',e=>{ if(e.code==='Space' && e.target.tagName!=='INPUT'){e.preventDefault(); setPlay(!state.playing)} if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault(); save();} });
 $('#btnSave').onclick=()=>save(); $('#btnNew').onclick=()=>{ if(confirm('Start a new project? Current is autosaved.')){ localStorage.removeItem('rea.autosave'); location.reload(); } };
 $('#btnExport').onclick=()=>{ save(true); const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(state.name||'rea-project')+'.rea.json'; a.click(); };
-$('#fileImport').onchange=e=>{ const f=e.target.files[0]; if(!f) return; if(f.type.startsWith('audio/')){ state.tracks.push({id:Date.now(),name:f.name.replace(/\.[^.]+$/,''),type:'Audio',color:COLORS[state.tracks.length%COLORS.length],vol:80,pan:0,mute:false,solo:false,clips:[{id:Date.now(),name:f.name,start:0,len:4,color:COLORS[0]}]}); render(); save(true); return;} f.text().then(t=>{state=JSON.parse(t); render(); save(true);}); };
-$('#audioImport').onchange=e=>{ const f=e.target.files[0]; if(!f) return; const url=URL.createObjectURL(f); const audio=new Audio(url); audio.play(); state.tracks.push({id:Date.now(),name:f.name,type:'Audio',color:COLORS[state.tracks.length%COLORS.length],vol:80,pan:0,mute:false,solo:false,clips:[{id:Date.now(),name:f.name,start:0,len:8,color:COLORS[4]}]}); render(); save(true); };
+$('#fileImport').onchange=e=>{ handleAnyImport(e.target.files[0], e.target); };
+$('#audioImport').onchange=e=>{ handleAnyImport(e.target.files[0], e.target); };
 $('#bpm').onchange=()=>{state.bpm=+$('#bpm').value; save(true)}; $('#sig').onchange=()=>{state.sig=$('#sig').value; save(true)}; $('#projName').onchange=()=>save(true);
 $('#btnAddTrack').onclick=()=>{ const type=$('#newTrackType').value; state.tracks.push({id:Date.now(),name:type+' '+(state.tracks.length+1),type,color:COLORS[state.tracks.length%COLORS.length],vol:80,pan:0,mute:false,solo:false,clips:[]}); save(true); render(); };
 $('#btnAddClip').onclick=()=>{ const t=state.tracks[state.selectedTrack]; if(!t) return; t.clips.push({id:Date.now(),name:'Clip '+(t.clips.length+1),start:t.clips.length*4,len:4,color:t.color}); save(true); render(); };
@@ -213,7 +258,8 @@ $('#btnChordMarkers').onclick=()=>{ state.markers=(state._chords||['Am','F','C',
 $('#btnChordTrack').onclick=()=>{ state.tracks.unshift({id:Date.now(),name:'Chord Track',type:'MIDI',color:'#f5c542',vol:70,pan:0,mute:false,solo:false,clips:(state._chords||['Am','F','C','G']).map((c,i)=>({id:Date.now()+i,name:c,start:i*4,len:4,color:'#f5c542'}))}); save(true); render(); };
 $('#btnSetTempo').onclick=()=>{ $('#bpm').value=120; state.bpm=120; alert('Project tempo set to 120 BPM. All items were first locked to Time timebase, then the analysed item was set to Beats — same safe flow as desktop v1.2.'); save(true); };
 const padNames=['Kick','Snare','Hat','Clap','Tom','Perc','Crash','FX']; $('#pads').innerHTML=padNames.map((n,i)=>'<button class="pad" data-pad="'+n+'">'+n+'<br><small>'+(i+1)+'</small></button>').join(''); $$('[data-pad]').forEach(b=>b.onclick=()=>drum(b.dataset.pad));
-loadAutosave(); render();
+loadAutosave(); render(); restoreAudioFromIDB();
+(function(){ const tl=document.getElementById('timeline'); if(!tl) return; tl.addEventListener('dragover', e=>{ e.preventDefault(); }); tl.addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if(f) handleAnyImport(f, null); }); })();
 </script><script>
 // Cosmetic only: toggles a body class while REA is playing so the EQ,
 // playhead glow and play pulse can react. No app state is touched.
