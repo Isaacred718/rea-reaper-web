@@ -199,7 +199,37 @@ function idbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open('rea-
 async function idbPut(id, blob){ try{ const db=await idbOpen(); return await new Promise((res,rej)=>{ const tx=db.transaction('files','readwrite'); tx.objectStore('files').put(blob,id); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); }); }catch(e){ return false; } }
 async function idbGet(id){ try{ const db=await idbOpen(); return await new Promise((res,rej)=>{ const rq=db.transaction('files','readonly').objectStore('files').get(id); rq.onsuccess=()=>res(rq.result||null); rq.onerror=()=>rej(rq.error); }); }catch(e){ return null; } }
 function computePeaks(buffer, n){ n=n||120; const data=buffer.getChannelData(0); const block=Math.max(1, Math.floor(data.length/n)); const peaks=[]; for(let i=0;i<n;i++){ let max=0; const start=i*block; for(let j=0;j<block;j+=Math.max(1,Math.floor(block/32))){ const v=Math.abs(data[start+j]||0); if(v>max) max=v; } peaks.push(Math.round(max*100)/100); } return peaks; }
-async function decodeAudioFile(file){ const ab=await file.arrayBuffer(); const ctx=ac(); try{ return await ctx.decodeAudioData(ab.slice(0)); }catch(e){ return await new Promise((res,rej)=>{ ac().decodeAudioData(ab.slice(0), res, rej); }); } }
+function decodeWavManually(ab, ctx){
+  const dv=new DataView(ab);
+  const str=o=>String.fromCharCode(dv.getUint8(o),dv.getUint8(o+1),dv.getUint8(o+2),dv.getUint8(o+3));
+  if(str(0)!=='RIFF' || str(8)!=='WAVE') throw new Error('Not a WAV file');
+  let fmt=null, dataOff=-1, dataLen=0, off=12;
+  while(off+8<=ab.byteLength){ const id=str(off); const size=dv.getUint32(off+4,true); const start=off+8;
+    if(id==='fmt '){ let format=dv.getUint16(start,true); const channels=dv.getUint16(start+2,true); const sampleRate=dv.getUint32(start+4,true); const bits=dv.getUint16(start+14,true); if(format===65534 && size>=24){ format=dv.getUint16(start+24,true); } fmt={format,channels,sampleRate,bits}; }
+    if(id==='data'){ dataOff=start; dataLen=Math.min(size, ab.byteLength-start); }
+    off=start+size+(size%2);
+  }
+  if(!fmt || dataOff<0) throw new Error('WAV missing fmt or data chunk');
+  const bytesPerSample=fmt.bits/8; const frameSize=Math.max(1, bytesPerSample*fmt.channels); const frames=Math.floor(dataLen/frameSize);
+  const buffer=ctx.createBuffer(fmt.channels, frames, fmt.sampleRate);
+  for(let ch=0; ch<fmt.channels; ch++){ const out=buffer.getChannelData(ch);
+    for(let i=0;i<frames;i++){ const o=dataOff + i*frameSize + ch*bytesPerSample; let v=0;
+      if(fmt.format===3 && fmt.bits===32) v=dv.getFloat32(o,true);
+      else if(fmt.format===3 && fmt.bits===64) v=dv.getFloat64(o,true);
+      else if(fmt.bits===8) v=(dv.getUint8(o)-128)/128;
+      else if(fmt.bits===16) v=dv.getInt16(o,true)/32768;
+      else if(fmt.bits===24){ let n=dv.getUint8(o)|(dv.getUint8(o+1)<<8)|(dv.getUint8(o+2)<<16); if(n&0x800000) n-=0x1000000; v=n/8388608; }
+      else if(fmt.bits===32) v=dv.getInt32(o,true)/2147483648;
+      else throw new Error('Unsupported WAV bit depth '+fmt.bits);
+      out[i]=v;
+    }
+  }
+  return buffer;
+}
+async function decodeAudioFile(file){ const ab=await file.arrayBuffer(); const ctx=ac();
+  try{ return await ctx.decodeAudioData(ab.slice(0)); }
+  catch(e1){ try{ return decodeWavManually(ab, ctx); }catch(e2){ try{ return await new Promise((res,rej)=>{ ac().decodeAudioData(ab.slice(0), res, rej); }); }catch(e3){ throw e2; } } }
+}
 async function importAudioFile(file){
   if(!file) return;
   importStatus('Importing '+file.name+' — decoding…');
