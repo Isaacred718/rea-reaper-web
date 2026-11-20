@@ -769,17 +769,37 @@ function detectTempo(buffer,clipName){
     }
   }
   let chosen=cands[0];
-  const inBand=cands.concat(peaks).filter(c=>c.bpm>=68&&c.bpm<=162).sort((a,b)=>b.ac-a.ac);
-  if(inBand.length) chosen=inBand[0];
+  let inBand=cands.concat(peaks).filter(c=>c.bpm>=68&&c.bpm<=162).sort((a,b)=>b.ac-a.ac);
+  if(inBand.length){
+    chosen=inBand[0];
+    // 3:2 metrical disambiguation: at some sample rates (e.g. 48 kHz) a
+    // 2/3-time (dotted-beat) lag can have higher AC than the true beat even
+    // though the beat peak is strong and clear. If the top candidate has a
+    // 3/2-time partner with comparable strength, prefer the faster (beat) level.
+    const partner=inBand.find(c=>c!==chosen && Math.abs(c.bpm/chosen.bpm-1.5)<=0.04 && c.ac>=0.65*chosen.ac && c.ac>=0.5);
+    if(partner) chosen=partner;
+  }
   let spike=0; for(let i=0;i<M;i++) if(env[i]>=0.25) spike++;
   const r1=x=>Math.round(x*10)/10, r2=x=>Math.round(x*100)/100, r3=x=>Math.round(x*1000)/1000;
-  // Family-aware confidence: the numerator stays the strongest AC peak in the
-  // chosen tempo's family (often the raw half/double lag). The required octave
-  // family is lag/4, lag/2, lag, lag*2, lag*4 (plus the raw lag when it is an
-  // octave of the chosen lag). The 85/130 conductor fixtures also put strong
-  // peaks at 3:2 and 3:1 metrical relatives of the beat, so the confidence
-  // runner also drops those same-grid lags. Genuinely different tempos still
-  // count as competitors and can reject the result.
+  const chosenPeak=acAt(chosen.lag);
+  // Band statistics for prominence gating. Highly periodic drum patterns can
+  // produce several strong metrical lags (e.g. a 2.5-beat lag at 48 kHz), so a
+  // peak-vs-single-runner ratio rejects correct periodicities. Instead accept a
+  // tempo when the chosen peak is absolutely strong and stands out from the
+  // band background (median AC), plus the onset-density and >=3-period gates
+  // which reject tone (few/no onsets, too few periods) and noise (weak peak).
+  const bandVals=[];
+  for(let L=minLag;L<=maxLag;L++) bandVals.push(ac[L]);
+  bandVals.sort((a,b)=>a-b);
+  const bandMedian=bandVals.length%2 ? bandVals[(bandVals.length-1)>>1] : (bandVals[bandVals.length/2-1]+bandVals[bandVals.length/2])/2;
+  let bandAbsSum=0; for(let i=0;i<bandVals.length;i++) bandAbsSum+=Math.abs(bandVals[i]);
+  const bandMeanAbs=bandAbsSum/(bandVals.length||1);
+  const prominence=chosenPeak-bandMedian;
+  // Relative confidence: prominence of the chosen peak over the average
+  // absolute AC level of the band (a ratio, never a fake percentage).
+  const rel=chosenPeak/Math.max(0.01,bandMeanAbs);
+  // Keep raw/octave/family runner-ups reported for diagnostics and ½×/2×
+  // alternatives, but do not gate on a single competing peak.
   const OCT_RATIOS=[0.25,0.5,1,2,4], GRID_RATIOS=[0.25,1/3,0.5,2/3,1,1.5,2,3,4];
   const inRatios=(a,b,ratios)=>{ const q=a/b; return ratios.some(k=>Math.abs(q-k)<=TEMPO_OCTAVE_TOL*k); };
   const lagsFor=ratios=>ratios.map(k=>chosen.lag*k).concat(inRatios(Lf,chosen.lag,ratios)?[Lf]:[]);
@@ -790,12 +810,11 @@ function detectTempo(buffer,clipName){
     if(!near(L,octLags)&&ac[L]>octaveRunner) octaveRunner=ac[L];
     if(!near(L,gridLags)&&ac[L]>runner) runner=ac[L];
   }
-  const chosenPeak=acAt(chosen.lag), rel=best/Math.max(0.01,runner);
-  // Name every gate that actually failed; a drum loop with 36 onsets must not
-  // be told its onset count is the problem when the octave runner-up was.
+  // Name every gate that actually failed.
   const reasons=[];
   if(best<0.16) reasons.push('the autocorrelation peak is too weak ('+r3(best)+' < 0.16)');
-  if(!isFinite(rel)||rel<1.05) reasons.push('low family confidence ('+r2(rel)+'× < 1.05× the next non-family peak)');
+  if(chosenPeak<0.25) reasons.push('the chosen tempo peak is too weak ('+r3(chosenPeak)+' < 0.25)');
+  if(prominence<0.20) reasons.push('low prominence over band median AC ('+r3(prominence)+' < 0.20 above median '+r3(bandMedian)+')');
   if(spike<6) reasons.push('too few onset frames ('+spike+' in '+M+' analysed; 6 needed)');
   if(M<chosen.lag*3) reasons.push('too few periods for the chosen lag ('+M+' frames < '+Math.ceil(chosen.lag*3)+')');
   const clear=reasons.length===0;
@@ -803,6 +822,7 @@ function detectTempo(buffer,clipName){
     bpm:clear?r1(chosen.bpm):null, rawBpm:r1(rawBpm), chosenRelation:chosen.rel,
     alternatives:cands.filter(c=>c!==chosen).map(c=>({bpm:r1(c.bpm),relation:c.rel,ac:r3(c.ac),rejected:true})),
     confidence:r2(rel), peak:r3(best), chosenPeak:r3(chosenPeak), runnerUp:r3(runner), octaveRunnerUp:r3(octaveRunner), rawRunnerUp:r3(rawRunner),
+    bandMedian:r3(bandMedian), bandMeanAbs:r3(bandMeanAbs), prominence:r3(prominence),
     clear,rejectReason:reasons.join('; '),clipName:name,clipDuration:duration,analysedSeconds:duration,frames:M,onsetFrames:spike,
     runtimeMs:Math.round((tempoNow()-t0)*10)/10
   };
@@ -817,9 +837,9 @@ function pickClipForAnalysis(){
 function tempoEsc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function tempoResultHTML(r){
   if(!r) return 'No analysis yet — import an audio clip, then Analyse.';
-  if(!r.clear) return 'No clear tempo in <b>'+tempoEsc(r.clipName)+'</b> ('+r.clipDuration.toFixed(1)+' s) — '+(r.rejectReason||'the detector found no reliable beat')+'.<br><span class="muted">Gate numbers: AC peak '+r.peak.toFixed(2)+', chosen-peak AC '+r.chosenPeak.toFixed(2)+', family confidence '+r.confidence.toFixed(2)+'× vs next non-family peak ('+r.runnerUp.toFixed(2)+'), '+r.onsetFrames+' onset frames in '+r.frames+' analysed.</span><br><span class="muted">Key/chord detection is desktop-only for now.</span>';
+  if(!r.clear) return 'No clear tempo in <b>'+tempoEsc(r.clipName)+'</b> ('+r.clipDuration.toFixed(1)+' s) — '+(r.rejectReason||'the detector found no reliable beat')+'.<br><span class="muted">Gate numbers: AC peak '+r.peak.toFixed(2)+', chosen-peak AC '+r.chosenPeak.toFixed(2)+', prominence '+(r.prominence!=null?r.prominence.toFixed(2):'?')+' above band median '+(r.bandMedian!=null?r.bandMedian.toFixed(2):'?')+', prominence ratio '+r.confidence.toFixed(2)+'× band mean |AC|, next non-family peak '+r.runnerUp.toFixed(2)+', '+r.onsetFrames+' onset frames in '+r.frames+' analysed.</span><br><span class="muted">Key/chord detection is desktop-only for now.</span>';
   const alts=r.alternatives.length?'; rejected: '+r.alternatives.map(a=>a.bpm.toFixed(1)+' BPM ('+a.relation+')').join(', '):'';
-  return '<b>Tempo:</b> '+r.bpm.toFixed(1)+' BPM <span class="muted">(relative confidence '+r.confidence.toFixed(2)+'× next non-family peak, chosen AC peak '+r.chosenPeak.toFixed(2)+' vs '+r.runnerUp.toFixed(2)+'; raw AC peak '+r.peak.toFixed(2)+')</span><br>'+
+  return '<b>Tempo:</b> '+r.bpm.toFixed(1)+' BPM <span class="muted">(relative confidence '+r.confidence.toFixed(2)+'× band mean |AC|, chosen AC peak '+r.chosenPeak.toFixed(2)+', prominence '+(r.prominence!=null?r.prominence.toFixed(2):'?')+' above band median '+(r.bandMedian!=null?r.bandMedian.toFixed(2):'?')+'; raw AC peak '+r.peak.toFixed(2)+', next non-family peak '+r.runnerUp.toFixed(2)+')</span><br>'+
     '<b>Clip:</b> '+tempoEsc(r.clipName)+' — '+r.clipDuration.toFixed(1)+' s (first '+r.analysedSeconds.toFixed(1)+' s analysed)<br>'+
     '<span class="muted">Raw autocorrelation best: '+r.rawBpm.toFixed(1)+' BPM'+alts+'. Use ½× / 2× if the octave is wrong.</span><br>'+
     '<span class="muted">Key/chord detection is desktop-only for now.</span>';
