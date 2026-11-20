@@ -605,6 +605,10 @@ function trackAudible(t){ const hasSolo=state.tracks.some(x=>x.solo); return !t.
 // sequencer: it is silent unless an unmuted MIDI/Synth track with a clip exists.
 function melodyTrack(){ return state.tracks.find(t=>trackAudible(t) && /^(midi|synth)$/i.test(t.type||'') && (t.clips||[]).length>0); }
 function playheadSec(){ return step*(60/state.bpm)*4/16; }
+// Header tempo readout: always 1 decimal so a detected raw float never leaks
+// into the display. Shared by the transport tick and both BPM input paths.
+function fmtBpm(bpm){ const n=Number(bpm); return (isFinite(n)?n:0).toFixed(1); }
+function renderSecDisp(){ const beat=step/4; $('#secDisp').textContent=(beat*60/state.bpm).toFixed(2)+'s • '+fmtBpm(state.bpm)+' BPM • '+state.sig; }
 async function setPlay(on){
   if(on && state.playing) return;                 // duplicate Play must not double-start
   const gen=++playGeneration;                     // cancels a pending start after Stop
@@ -625,7 +629,7 @@ async function setPlay(on){
       const beat=step/4;
       $('#playhead').style.left=(12+beat*80)+'px';
       $('#timeDisp').textContent=(Math.floor(beat/4)+1)+'.'+(Math.floor(beat%4)+1)+'.'+String(step%4*25).padStart(2,'0');
-      $('#secDisp').textContent=(beat*60/state.bpm).toFixed(2)+'s • '+state.bpm+' BPM • '+state.sig;
+      renderSecDisp();   // same 1-decimal BPM format as the Set Tempo / manual input paths
       if($('#metroChk').checked && step%4===0) tone(880,0.06,'square',0.08); // explicit user opt-in only
       const mt=melodyTrack();
       if(mt && state.notes[step%16]){
@@ -657,7 +661,7 @@ $('#btnSave').onclick=()=>save(); $('#btnNew').onclick=()=>{ if(confirm('Start a
 $('#btnExport').onclick=()=>{ save(true); const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(state.name||'rea-project')+'.rea.json'; a.click(); };
 $('#fileImport').onchange=e=>{ handleAnyImport(e.target.files[0], e.target); };
 $('#audioImport').onchange=e=>{ handleAnyImport(e.target.files[0], e.target); };
-$('#bpm').onchange=()=>{state.bpm=+$('#bpm').value; save(true)}; $('#sig').onchange=()=>{state.sig=$('#sig').value; save(true)}; $('#projName').onchange=()=>save(true);
+$('#bpm').onchange=()=>{state.bpm=+$('#bpm').value; renderSecDisp(); save(true)}; $('#sig').onchange=()=>{state.sig=$('#sig').value; save(true)}; $('#projName').onchange=()=>save(true);
 $('#btnAddTrack').onclick=()=>{ const type=$('#newTrackType').value; state.tracks.push({id:Date.now(),name:type+' '+(state.tracks.length+1),type,color:COLORS[state.tracks.length%COLORS.length],vol:80,pan:0,mute:false,solo:false,clips:[]}); save(true); render(); };
 $('#btnAddClip').onclick=()=>{ const t=state.tracks[state.selectedTrack]; if(!t) return; t.clips.push({id:Date.now(),name:'Clip '+(t.clips.length+1),start:t.clips.length*4,len:4,color:t.color}); save(true); render(); };
 $('#viewMixerBtn').onclick=()=>{ switchView('mixer') };
@@ -878,7 +882,8 @@ $('#btnSetTempo').onclick=()=>{
     $('#scalerOut').textContent='Run Analyse first — no detected tempo to apply.'; return;
   }
   const bpm=Math.round(state._detectedTempo*10)/10;
-  $('#bpm').value=String(bpm); state.bpm=bpm;
+  $('#bpm').value=fmtBpm(bpm); state.bpm=bpm;
+  renderSecDisp();   // stopped transport never ticks, so refresh the header here
   if(state.playing) rescheduleIfPlaying();   // secPerBar derives from state.bpm
   save(true);
   if(state._tempoResult) $('#scalerOut').innerHTML=tempoResultHTML(state._tempoResult)+'<br><b>Applied to project:</b> '+bpm.toFixed(1)+' BPM.';
