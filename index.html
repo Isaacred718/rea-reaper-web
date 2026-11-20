@@ -167,7 +167,7 @@ footer{padding:18px 14px 30px;color:var(--dim);font-size:13px;line-height:1.6}
     <div id="stemBasic"><label>Quality <select id="quality"><option>Fast draft</option><option selected>Standard</option><option>Ensemble HQ</option></select></label><div class="row"><label><input type="checkbox" checked data-stemchk="Vocals"> Vocals</label><label><input type="checkbox" checked data-stemchk="Drums"> Drums</label><label><input type="checkbox" checked data-stemchk="Bass"> Bass</label><label><input type="checkbox" checked data-stemchk="Other"> Other</label></div><button class="btn primary" id="btnSeparate" style="width:100%;margin-top:8px">Separate Selected Track</button></div>
     <div id="stemScan" hidden><p class="muted">Scan finds Guitar and Piano too, with energy in dB and %.</p><button class="btn" id="btnScan" style="width:100%">Scan for Instruments</button><ul class="list" id="scanList"></ul></div>
     <div id="stemDrums" hidden><div class="row"><label><input type="checkbox" checked> Kick</label><label><input type="checkbox" checked> Snare</label><label><input type="checkbox" checked> Hi-Hat</label><label><input type="checkbox" checked> Toms</label><label><input type="checkbox" checked> Cymbals</label></div><button class="btn primary" id="btnDrums" style="width:100%">Split Drums</button></div>
-    <div id="stemScaler" hidden><button class="btn teal" id="btnAnalyse" style="width:100%">Analyse Chords, Key & Tempo</button><div id="scalerOut" class="muted" style="margin-top:10px">No analysis yet.</div><div class="row"><button class="btn" id="btnChordMarkers">Add Chord Markers</button><button class="btn" id="btnChordTrack">Create Chord Track</button><button class="btn" id="btnSetTempo">Set Project Tempo</button></div></div>
+    <div id="stemScaler" hidden><button class="btn teal" id="btnAnalyse" style="width:100%">Analyse Tempo (real audio)</button><div id="scalerOut" class="muted" style="margin-top:10px">No analysis yet — import an audio clip, then Analyse.</div><div class="row"><button class="btn" id="btnTempoHalf" title="Halve the detected tempo">½×</button><button class="btn" id="btnTempoDouble" title="Double the detected tempo">2×</button><button class="btn" id="btnChordMarkers">Add Chord Markers</button><button class="btn" id="btnChordTrack">Create Chord Track</button><button class="btn" id="btnSetTempo">Set Project Tempo</button></div></div>
     <progress id="prog" value="0" max="100" style="margin-top:12px"></progress><p class="muted" id="progTxt">Ready.</p>
     <h3>Markers / Chords</h3><ul class="list" id="markerList"></ul>
     <h3>GitHub Pages deploy</h3>
@@ -668,10 +668,174 @@ function runProgress(label,done){ let p=0; $('#progTxt').textContent=label; cons
 $('#btnSeparate').onclick=()=>{ const checks=$$('[data-stemchk]:checked').map(c=>c.dataset.stemchk); runProgress('Separating ('+$('#quality').value+')',()=>{ checks.forEach((n,i)=>state.tracks.push({id:Date.now()+i,name:n+' — Stem',type:n,color:COLORS[(state.tracks.length+i)%COLORS.length],vol:78,pan:0,mute:false,solo:false,clips:[{id:Date.now()+i,name:n+' stem',start:0,len:8,color:COLORS[i%COLORS.length]}]})); }); };
 $('#btnScan').onclick=()=>{ $('#scanList').innerHTML=[['Vocals',-8,'32%'],['Drums',-3,'41%'],['Bass',-11,'18%'],['Guitar',-18,'6%'],['Piano',-24,'3%'],['Other',-20,'5%']].map(x=>'<li><span>'+x[0]+'</span><b>'+x[1]+' dB • '+x[2]+'</b></li>').join(''); };
 $('#btnDrums').onclick=()=>runProgress('Splitting drums',()=>{ ['Kick','Snare','Hi-Hat','Toms','Cymbals'].forEach((n,i)=>state.tracks.push({id:Date.now()+i,name:n,type:'Drums',color:COLORS[i%COLORS.length],vol:76,pan:0,mute:false,solo:false,clips:[{id:Date.now()+i,name:n,start:0,len:4,color:COLORS[i%COLORS.length]}]})); });
-$('#btnAnalyse').onclick=()=>{ $('#scalerOut').innerHTML='<b>Key:</b> A Minor (78%)<br><b>Tempo:</b> 120 BPM<br><b>Time sig:</b> 4/4 estimate<br><b>Chords:</b> Am — F — C — G (each 1 bar)'; state._chords=['Am','F','C','G']; };
-$('#btnChordMarkers').onclick=()=>{ state.markers=(state._chords||['Am','F','C','G']).map((c,i)=>'Bar '+(i+1)+': '+c); save(true); render(); };
-$('#btnChordTrack').onclick=()=>{ state.tracks.unshift({id:Date.now(),name:'Chord Track',type:'MIDI',color:'#f5c542',vol:70,pan:0,mute:false,solo:false,clips:(state._chords||['Am','F','C','G']).map((c,i)=>({id:Date.now()+i,name:c,start:i*4,len:4,color:'#f5c542'}))}); save(true); render(); };
-$('#btnSetTempo').onclick=()=>{ $('#bpm').value=120; state.bpm=120; alert('Project tempo set to 120 BPM. All items were first locked to Time timebase, then the analysed item was set to Beats — same safe flow as desktop v1.2.'); save(true); };
+// ---- Real tempo detector (lane 3): pure JS, no libraries / WASM / network ----
+// 60 s cap -> mono -> 1024-pt radix-2 FFT positive spectral flux (hop 512)
+// -> normalised autocorrelation for 40-200 BPM -> octave-aware peak pick.
+const TEMPO_CAP_SEC=60, TEMPO_HOP=512, TEMPO_FFT=1024, TEMPO_MIN_BPM=40, TEMPO_MAX_BPM=200;
+function tempoNow(){ try{ return (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now(); }catch(e){ return Date.now(); } }
+function tempoFFT(re,im){
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){ let bit=n>>1; for(; j&bit; bit>>=1) j^=bit; j^=bit;
+    if(i<j){ let t=re[i]; re[i]=re[j]; re[j]=t; t=im[i]; im[i]=im[j]; im[j]=t; } }
+  for(let len=2;len<=n;len<<=1){
+    const ang=-2*Math.PI/len, wr0=Math.cos(ang), wi0=Math.sin(ang), half=len>>1;
+    for(let i=0;i<n;i+=len){ let wr=1,wi=0;
+      for(let k=0;k<half;k++){ const a=i+k,b=a+half;
+        const tr=re[b]*wr-im[b]*wi, ti=re[b]*wi+im[b]*wr;
+        re[b]=re[a]-tr; im[b]=im[a]-ti; re[a]+=tr; im[a]+=ti;
+        const nwr=wr*wr0-wi*wi0; wi=wr*wi0+wi*wr0; wr=nwr;
+      }
+    }
+  }
+}
+function tempoEnvelope(buffer){
+  const sr=buffer.sampleRate, N=TEMPO_FFT, half=N>>1;
+  const n=Math.min(buffer.length, Math.floor(sr*TEMPO_CAP_SEC));
+  const frames=Math.max(0, Math.floor((n-N)/TEMPO_HOP)+1);
+  const env=new Float32Array(frames), re=new Float64Array(N), im=new Float64Array(N);
+  const win=new Float64Array(N); for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
+  const chans=[]; for(let c=0;c<Math.min(2,buffer.numberOfChannels||1);c++) chans.push(buffer.getChannelData(c));
+  let prev=new Float64Array(half), cur=new Float64Array(half);
+  for(let f=0;f<frames;f++){
+    const off=f*TEMPO_HOP, nc=chans.length;
+    for(let i=0;i<N;i++){ let s=0; for(let c=0;c<nc;c++) s+=chans[c][off+i]||0; re[i]=s/nc*win[i]; im[i]=0; }
+    tempoFFT(re,im);
+    for(let k=0;k<half;k++) cur[k]=Math.sqrt(re[k]*re[k]+im[k]*im[k]);
+    if(f>0){ let flux=0; for(let k=1;k<half;k++) flux+=Math.max(0,cur[k]-prev[k]); env[f]=flux/half; }
+    const swap=prev; prev=cur; cur=swap;
+  }
+  // local-mean subtraction + half-wave rectify keeps onsets, drops slow level drift
+  const W=Math.max(3,Math.round(sr/TEMPO_HOP)), out=new Float32Array(frames);
+  let sum=0;
+  for(let i=0;i<frames;i++){
+    if(i<W) sum+=env[i]; else sum+=env[i]-env[i-W];
+    const mean=sum/Math.min(W,i+1);
+    out[i]=Math.max(0,env[i]-mean);
+  }
+  let max=0; for(let i=0;i<frames;i++) if(out[i]>max) max=out[i];
+  if(max>0) for(let i=0;i<frames;i++) out[i]/=max;
+  return out;
+}
+function tempoAutocorr(env,sr,hop){
+  const M=env.length, minLag=Math.max(2,Math.floor(60*sr/(TEMPO_MAX_BPM*hop)));
+  const maxLag=Math.max(minLag,Math.min(M-2,Math.ceil(60*sr/(TEMPO_MIN_BPM*hop))));
+  const mean=env.reduce((a,b)=>a+b,0)/(M||1), x=new Float64Array(M);
+  for(let i=0;i<M;i++) x[i]=env[i]-mean;
+  const ac=new Float64Array(maxLag+2);
+  for(let L=minLag;L<=maxLag;L++){
+    let s=0,e1=0,e2=0;
+    for(let i=0;i+L<M;i++){ const a=x[i],b=x[i+L]; s+=a*b; e1+=a*a; e2+=b*b; }
+    ac[L]=(e1>0&&e2>0)?s/Math.sqrt(e1*e2):0;
+  }
+  return {ac,minLag,maxLag};
+}
+function tempoRefine(ac,L){
+  if(L-1<0||L+1>=ac.length) return L;
+  const a=ac[L-1],b=ac[L],c=ac[L+1],d=a-2*b+c;
+  if(Math.abs(d)<1e-12) return L;
+  return L+Math.max(-0.5,Math.min(0.5,0.5*(a-c)/d));
+}
+function detectTempo(buffer,clipName){
+  const t0=tempoNow(), sr=buffer.sampleRate, hop=TEMPO_HOP, name=clipName||'audio clip';
+  const duration=Math.min((buffer.duration||buffer.length/sr),TEMPO_CAP_SEC);
+  if(!buffer || buffer.length<sr*0.25) return {bpm:null,clear:false,clipName:name,clipDuration:duration,analysedSeconds:duration,rawBpm:null,alternatives:[],confidence:0,peak:0,runnerUp:0,runtimeMs:0,note:'clip too short'};
+  const env=tempoEnvelope(buffer), M=env.length;
+  const {ac,minLag,maxLag}=tempoAutocorr(env,sr,hop);
+  let bestL=minLag,best=ac[minLag];
+  for(let L=minLag;L<=maxLag;L++) if(ac[L]>best){ best=ac[L]; bestL=L; }
+  let runner=0;
+  for(let L=minLag;L<=maxLag;L++) if(Math.abs(L-bestL)>2 && ac[L]>=ac[L-1] && ac[L]>=ac[L+1] && ac[L]>runner) runner=ac[L];
+  const Lf=tempoRefine(ac,bestL), rawBpm=sr*60/(hop*Lf);
+  const acAt=L=>{ const l0=Math.floor(L),fr=L-l0; return (ac[l0]||0)*(1-fr)+(ac[l0+1]||0)*fr; };
+  // Octave family: report each halving/doubling that stays inside 40-200 BPM.
+  const cands=[{rel:'raw',bpm:rawBpm,lag:Lf,ac:best}];
+  for(let k=1;k<=4;k++){
+    const mult=Math.pow(2,k), up=rawBpm*mult, ul=Lf/mult;
+    if(up<=TEMPO_MAX_BPM&&ul>=minLag) cands.push({rel:'×'+mult,bpm:up,lag:ul,ac:acAt(ul)});
+    const dn=rawBpm/mult, dl=Lf*mult;
+    if(dn>=TEMPO_MIN_BPM&&dl<=maxLag) cands.push({rel:'÷'+mult,bpm:dn,lag:dl,ac:acAt(dl)});
+  }
+  // Deliberate octave handling: autocorrelation happily locks onto a 2- or
+  // 4-beat pattern. If the raw best is outside the useful 70-160 BPM range
+  // (2 BPM edge tolerance), pick the strongest in-range octave instead. The raw
+  // best and every rejected option are reported for the ½× / 2× buttons.
+  let chosen=cands[0];
+  if(chosen.bpm<68||chosen.bpm>162){
+    const inBand=cands.filter(c=>c.bpm>=68&&c.bpm<=162).sort((a,b)=>b.ac-a.ac);
+    if(inBand.length) chosen=inBand[0];
+  }
+  let spike=0; for(let i=0;i<M;i++) if(env[i]>=0.25) spike++;
+  const rel=best/Math.max(0.01,runner);
+  // A steady tone has a smooth envelope: few onset spikes and no real periodic
+  // beats, so require >=3 periods and a real onset density before calling tempo.
+  const clear=M>=chosen.lag*3 && spike>=6 && best>=0.16 && isFinite(rel) && rel>=1.05;
+  const r1=x=>Math.round(x*10)/10;
+  return {
+    bpm:clear?r1(chosen.bpm):null, rawBpm:r1(rawBpm), chosenRelation:chosen.rel,
+    alternatives:cands.filter(c=>c!==chosen).map(c=>({bpm:r1(c.bpm),relation:c.rel,ac:Math.round(c.ac*1000)/1000,rejected:true})),
+    confidence:Math.round(rel*100)/100, peak:Math.round(best*1000)/1000, runnerUp:Math.round(runner*1000)/1000,
+    clear,clipName:name,clipDuration:duration,analysedSeconds:duration,frames:M,onsetFrames:spike,
+    runtimeMs:Math.round((tempoNow()-t0)*10)/10
+  };
+}
+function pickClipForAnalysis(){
+  if(state.selectedClip!=null){ const info=clipById(state.selectedClip);
+    if(info&&info.clip&&info.clip.audioId&&audioBuffers[info.clip.audioId]) return {clip:info.clip,buffer:audioBuffers[info.clip.audioId]}; }
+  for(const t of state.tracks) for(const c of (t.clips||[]))
+    if(c.audioId&&audioBuffers[c.audioId]) return {clip:c,buffer:audioBuffers[c.audioId]};
+  return null;
+}
+function tempoEsc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function tempoResultHTML(r){
+  if(!r) return 'No analysis yet — import an audio clip, then Analyse.';
+  if(!r.clear) return 'No clear tempo in <b>'+tempoEsc(r.clipName)+'</b> ('+r.clipDuration.toFixed(1)+' s) — only '+(r.onsetFrames||0)+' onset frames in '+r.frames+' analysed; a steady tone gives no beat to track, so no tempo is reported.<br><span class="muted">Key/chord detection is desktop-only for now.</span>';
+  const alts=r.alternatives.length?'; rejected: '+r.alternatives.map(a=>a.bpm.toFixed(1)+' BPM ('+a.relation+')').join(', '):'';
+  return '<b>Tempo:</b> '+r.bpm.toFixed(1)+' BPM <span class="muted">(relative confidence '+r.confidence.toFixed(2)+'× next peak, peak '+r.peak.toFixed(2)+')</span><br>'+
+    '<b>Clip:</b> '+tempoEsc(r.clipName)+' — '+r.clipDuration.toFixed(1)+' s (first '+r.analysedSeconds.toFixed(1)+' s analysed)<br>'+
+    '<span class="muted">Raw autocorrelation best: '+r.rawBpm.toFixed(1)+' BPM'+alts+'. Use ½× / 2× if the octave is wrong.</span><br>'+
+    '<span class="muted">Key/chord detection is desktop-only for now.</span>';
+}
+function applyTempoCorrection(mult){
+  if(typeof state._detectedTempo!=='number'||!isFinite(state._detectedTempo)){ $('#scalerOut').textContent='Run Analyse first — no detected tempo to change.'; return; }
+  state._detectedTempo=Math.round(Math.max(20,Math.min(400,state._detectedTempo*mult))*10)/10;
+  if(state._tempoResult){ state._tempoResult.bpm=state._detectedTempo; state._tempoResult.corrected=mult; $('#scalerOut').innerHTML=tempoResultHTML(state._tempoResult); }
+  save(true);
+}
+$('#btnAnalyse').onclick=async ()=>{
+  const out=$('#scalerOut'), picked=pickClipForAnalysis();
+  if(!picked){
+    state._detectedTempo=null; state._tempoResult=null; delete state._chords;
+    out.textContent='Import an audio clip first — tempo analysis needs real audio from a clip.';
+    return;
+  }
+  out.textContent='Detecting tempo…';
+  await new Promise(r=>{ if(typeof requestAnimationFrame==='function') requestAnimationFrame(()=>r()); else Promise.resolve().then(r); });
+  try{
+    const r=detectTempo(picked.buffer,picked.clip.name);
+    state._tempoResult=r; state._detectedTempo=r.clear?r.bpm:null; delete state._chords;
+    out.innerHTML=tempoResultHTML(r); save(true);
+  }catch(e){ out.textContent='Tempo analysis failed: '+((e&&e.message)||e); }
+};
+$('#btnTempoHalf').onclick=()=>applyTempoCorrection(0.5);
+$('#btnTempoDouble').onclick=()=>applyTempoCorrection(2);
+function chordDesktopOnly(){
+  const out=$('#scalerOut');
+  out.innerHTML=(out.innerHTML||'')+'<br><span class="muted">Chord markers/tracks need key detection, which is desktop-only for now — no chords were created.</span>';
+}
+$('#btnChordMarkers').onclick=chordDesktopOnly;
+$('#btnChordTrack').onclick=chordDesktopOnly;
+$('#btnSetTempo').onclick=()=>{
+  if(typeof state._detectedTempo!=='number'||!isFinite(state._detectedTempo)){
+    $('#scalerOut').textContent='Run Analyse first — no detected tempo to apply.'; return;
+  }
+  const bpm=Math.round(state._detectedTempo*10)/10;
+  $('#bpm').value=String(bpm); state.bpm=bpm;
+  if(state.playing) rescheduleIfPlaying();   // secPerBar derives from state.bpm
+  save(true);
+  if(state._tempoResult) $('#scalerOut').innerHTML=tempoResultHTML(state._tempoResult)+'<br><b>Applied to project:</b> '+bpm.toFixed(1)+' BPM.';
+  else $('#scalerOut').textContent='Project tempo set to '+bpm.toFixed(1)+' BPM.';
+};
+window.__reaTempo={detectTempo,tempoEnvelope,pickClipForAnalysis,tempoResultHTML,runAnalyse:()=>$('#btnAnalyse').onclick()};
 const padNames=['Kick','Snare','Hat','Clap','Tom','Perc','Crash','FX']; $('#pads').innerHTML=padNames.map((n,i)=>'<button class="pad" data-pad="'+n+'">'+n+'<br><small>'+(i+1)+'</small></button>').join(''); $$('[data-pad]').forEach(b=>b.onclick=()=>drum(b.dataset.pad));
 loadAutosave(); render(); audioRestorePromise=restoreAudioFromIDB();
 (function(){ const tl=document.getElementById('timeline'); if(!tl) return; tl.addEventListener('dragover', e=>{ e.preventDefault(); }); tl.addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if(f) handleAnyImport(f, null); }); })();
