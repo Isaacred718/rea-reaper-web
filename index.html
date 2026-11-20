@@ -97,6 +97,7 @@ footer{padding:18px 14px 30px;color:var(--dim);font-size:13px;line-height:1.6}
 .ctx-menu button:hover,.ctx-menu button:focus{background:rgba(245,197,66,.12);color:var(--gold2);outline:none}
 .ctx-menu button.danger:hover{background:rgba(233,79,55,.18);color:#ffb3a7}
 .ctx-menu .ctx-sep{height:1px;background:var(--line);margin:4px 6px}
+.stem-row{flex-wrap:wrap}.stem-row>span:first-child{flex:1;min-width:170px}.stem-row small{display:block;color:var(--dim);margin-top:3px}.stem-row .btn{min-height:36px;padding:5px 9px;font-size:12px}#scanAudition .btn{flex:1;min-width:78px}
 </style></head>
 <body>
 <header class="top">
@@ -162,11 +163,17 @@ footer{padding:18px 14px 30px;color:var(--dim);font-size:13px;line-height:1.6}
 
   <aside class="card">
     <h2>Stem Separation + Scaler</h2>
-    <p class="muted">Web workflow of your desktop IDW Stem Separator v1.3. In the browser this is a workflow simulation: it creates the stem tracks and structure so you can mix and arrange anywhere. Real Demucs separation still runs in desktop REAPER on your Mac.</p>
+    <p class="muted">Web workflow of your desktop IDW Stem Separator v1.3. In the browser this is a real spectral preview of the selected audio clip: audition the stems in place, then confirm which ones become tracks. Real Demucs separation still runs in desktop REAPER on your Mac.</p>
     <div class="tabs"><button class="on" data-stem="basic">Basic 4-Stem</button><button data-stem="scan">Scan</button><button data-stem="drums">Drums Only</button><button data-stem="scaler">Scaler</button></div>
-    <div id="stemBasic"><label>Quality <select id="quality"><option>Fast draft</option><option selected>Standard</option><option>Ensemble HQ</option></select></label><div class="row"><label><input type="checkbox" checked data-stemchk="Vocals"> Vocals</label><label><input type="checkbox" checked data-stemchk="Drums"> Drums</label><label><input type="checkbox" checked data-stemchk="Bass"> Bass</label><label><input type="checkbox" checked data-stemchk="Other"> Other</label></div><button class="btn primary" id="btnSeparate" style="width:100%;margin-top:8px">Separate Selected Track</button></div>
-    <div id="stemScan" hidden><p class="muted">Scan finds Guitar and Piano too, with energy in dB and %.</p><button class="btn" id="btnScan" style="width:100%">Scan for Instruments</button><ul class="list" id="scanList"></ul></div>
-    <div id="stemDrums" hidden><div class="row"><label><input type="checkbox" checked> Kick</label><label><input type="checkbox" checked> Snare</label><label><input type="checkbox" checked> Hi-Hat</label><label><input type="checkbox" checked> Toms</label><label><input type="checkbox" checked> Cymbals</label></div><button class="btn primary" id="btnDrums" style="width:100%">Split Drums</button></div>
+    <div id="stemBasic"><label>Quality <select id="quality"><option>Fast draft</option><option selected>Standard</option><option>Ensemble HQ</option></select></label> <span class="muted">quality is desktop-only</span><div class="row"><label><input type="checkbox" checked data-stemchk="Vocals"> Vocals</label><label><input type="checkbox" checked data-stemchk="Drums"> Drums</label><label><input type="checkbox" checked data-stemchk="Bass"> Bass</label><label><input type="checkbox" checked data-stemchk="Other"> Other</label></div><button class="btn primary" id="btnSeparate" style="width:100%;margin-top:8px">Separate Selected Track</button><p class="muted">Runs the real spectral scan and opens the Scan tab. The Vocals box uses the harmonic stem (vocals + melody), not isolated vocals; Other uses Highs &amp; Air.</p></div>
+    <div id="stemScan" hidden>
+      <p class="notice">Web preview separation (spectral) — full Demucs separation runs in desktop REAPER.</p>
+      <button class="btn" id="btnScan" style="width:100%">Scan for Instruments</button>
+      <p class="muted" id="scanStatus">No preview yet — import an audio clip, then Scan.</p>
+      <ul class="list" id="scanList"></ul>
+      <div class="row" id="scanAudition" hidden><button class="btn teal" id="btnPlayMix">▶ Play Mix</button><button class="btn" id="btnStopAudition">■ Stop</button><button class="btn primary" id="btnCommitScan" disabled>Create Tracks</button><button class="btn" id="btnDiscardScan">Discard</button></div>
+    </div>
+    <div id="stemDrums" hidden><div class="row"><label>Kick</label><label>Snare</label><label>Hi-Hat / Cymbals</label></div><button class="btn primary" id="btnDrums" style="width:100%">Split Drums</button><p class="muted">Runs the same spectral preview, split into percussive bands (below 160 Hz, 160 Hz–6 kHz, 6 kHz+), and opens the Scan tab for audition. Full drum-kit splitting (toms, individual cymbals) is desktop-only.</p></div>
     <div id="stemScaler" hidden><button class="btn teal" id="btnAnalyse" style="width:100%">Analyse Tempo (real audio)</button><div id="scalerOut" class="muted" style="margin-top:10px">No analysis yet — import an audio clip, then Analyse.</div><div class="row"><button class="btn" id="btnTempoHalf" title="Halve the detected tempo">½×</button><button class="btn" id="btnTempoDouble" title="Double the detected tempo">2×</button><button class="btn" id="btnChordMarkers">Add Chord Markers</button><button class="btn" id="btnChordTrack">Create Chord Track</button><button class="btn" id="btnSetTempo">Set Project Tempo</button></div></div>
     <progress id="prog" value="0" max="100" style="margin-top:12px"></progress><p class="muted" id="progTxt">Ready.</p>
     <h3>Markers / Chords</h3><ul class="list" id="markerList"></ul>
@@ -669,9 +676,7 @@ function switchView(v){ $$('[data-view]').forEach(b=>b.classList.toggle('on',b.d
 $$('[data-view]').forEach(b=>b.onclick=()=>switchView(b.dataset.view));
 $$('[data-stem]').forEach(b=>b.onclick=()=>{ $$('[data-stem]').forEach(x=>x.classList.toggle('on',x===b)); ['basic','scan','drums','scaler'].forEach(k=>{ $('#stem'+k.charAt(0).toUpperCase()+k.slice(1)).hidden=k!==b.dataset.stem; }); });
 function runProgress(label,done){ let p=0; $('#progTxt').textContent=label; const iv=setInterval(()=>{p+=10; $('#prog').value=p; if(p>=100){clearInterval(iv); $('#progTxt').textContent=label+' — done. New tracks added to Arrange.'; done&&done(); save(true); render();}},180); }
-$('#btnSeparate').onclick=()=>{ const checks=$$('[data-stemchk]:checked').map(c=>c.dataset.stemchk); runProgress('Separating ('+$('#quality').value+')',()=>{ checks.forEach((n,i)=>state.tracks.push({id:Date.now()+i,name:n+' — Stem',type:n,color:COLORS[(state.tracks.length+i)%COLORS.length],vol:78,pan:0,mute:false,solo:false,clips:[{id:Date.now()+i,name:n+' stem',start:0,len:8,color:COLORS[i%COLORS.length]}]})); }); };
-$('#btnScan').onclick=()=>{ $('#scanList').innerHTML=[['Vocals',-8,'32%'],['Drums',-3,'41%'],['Bass',-11,'18%'],['Guitar',-18,'6%'],['Piano',-24,'3%'],['Other',-20,'5%']].map(x=>'<li><span>'+x[0]+'</span><b>'+x[1]+' dB • '+x[2]+'</b></li>').join(''); };
-$('#btnDrums').onclick=()=>runProgress('Splitting drums',()=>{ ['Kick','Snare','Hi-Hat','Toms','Cymbals'].forEach((n,i)=>state.tracks.push({id:Date.now()+i,name:n,type:'Drums',color:COLORS[i%COLORS.length],vol:76,pan:0,mute:false,solo:false,clips:[{id:Date.now()+i,name:n,start:0,len:4,color:COLORS[i%COLORS.length]}]})); });
+// Basic / Scan / Drums buttons are wired to the real spectral preview engine below.
 // ---- Real tempo detector (lane 3): pure JS, no libraries / WASM / network ----
 // 60 s cap -> mono -> 1024-pt radix-2 FFT positive spectral flux (hop 512)
 // -> normalised autocorrelation for 40-200 BPM -> octave-aware peak pick.
@@ -889,6 +894,386 @@ $('#btnSetTempo').onclick=()=>{
   if(state._tempoResult) $('#scalerOut').innerHTML=tempoResultHTML(state._tempoResult)+'<br><b>Applied to project:</b> '+bpm.toFixed(1)+' BPM.';
   else $('#scalerOut').textContent='Project tempo set to '+bpm.toFixed(1)+' BPM.';
 };
+  // ---- Scan tab: real spectral preview + in-place audition + commit (lane 7) ----
+  // True ML separation (Demucs) cannot run in a browser. This is an honest STFT
+  // harmonic/percussive mask preview on the selected clip's decoded AudioBuffer.
+  // It never edits the project until Create Tracks is pressed.
+  const SCAN_FFT=2048, SCAN_HOP=512, SCAN_SEG_SEC=20, SCAN_DETECT_DB=-42;
+  const SCAN_PLAN=(()=>{
+    const n=SCAN_FFT, rev=new Uint32Array(n), bits=Math.round(Math.log2(n));
+    for(let i=0;i<n;i++){ let x=i,r=0; for(let b=0;b<bits;b++){ r=(r<<1)|(x&1); x>>=1; } rev[i]=r; }
+    const cos=new Float64Array(n/2), sin=new Float64Array(n/2);
+    for(let k=0;k<n/2;k++){ cos[k]=Math.cos(-2*Math.PI*k/n); sin[k]=Math.sin(-2*Math.PI*k/n); }
+    return {rev,cos,sin};
+  })();
+  function scanFFT(re,im,inverse){
+    const n=SCAN_FFT, rev=SCAN_PLAN.rev, cos=SCAN_PLAN.cos, sin=SCAN_PLAN.sin;
+    for(let i=0;i<n;i++){ const j=rev[i]; if(i<j){ let t=re[i]; re[i]=re[j]; re[j]=t; t=im[i]; im[i]=im[j]; im[j]=t; } }
+    for(let len=2;len<=n;len<<=1){
+      const half=len>>1, step=n/len;
+      for(let i=0;i<n;i+=len){
+        for(let k=0;k<half;k++){
+          const tw=k*step, wr=cos[tw], wi=inverse?-sin[tw]:sin[tw];
+          const a=i+k, b=a+half, tr=re[b]*wr-im[b]*wi, ti=re[b]*wi+im[b]*wr;
+          re[b]=re[a]-tr; im[b]=im[a]-ti; re[a]+=tr; im[a]+=ti;
+        }
+      }
+    }
+    if(inverse) for(let i=0;i<n;i++){ re[i]/=n; im[i]/=n; }
+  }
+  // Sliding median with sorted-window insertion/removal: O(rows*cols*log W).
+  function scanMedianCols(src,rows,cols,w){
+    const out=new Float32Array(rows*cols), half=w>>1, buf=new Float64Array(w);
+    for(let c=0;c<cols;c++){
+      let n=0;
+      for(let r=0;r<=half&&r<rows;r++) buf[n++]=src[r*cols+c];
+      for(let i=1;i<n;i++){ const v=buf[i]; let j=i-1; while(j>=0&&buf[j]>v){ buf[j+1]=buf[j]; j--; } buf[j+1]=v; }
+      for(let r=0;r<rows;r++){
+        out[r*cols+c]=buf[n>>1];
+        const oldR=r-half;
+        if(oldR>=0){ const v=src[oldR*cols+c]; let lo=0,hi=n; while(lo<hi){ const m=(lo+hi)>>1; if(buf[m]<v) lo=m+1; else hi=m; }
+          for(let i=lo;i<n-1;i++) buf[i]=buf[i+1]; n--; }
+        const newR=r+half+1;
+        if(newR<rows){ const v=src[newR*cols+c]; let lo=0,hi=n; while(lo<hi){ const m=(lo+hi)>>1; if(buf[m]<v) lo=m+1; else hi=m; }
+          for(let i=n;i>lo;i--) buf[i]=buf[i-1]; buf[lo]=v; n++; }
+      }
+    }
+    return out;
+  }
+  function scanMedianRows(src,rows,cols,w){
+    const out=new Float32Array(rows*cols), half=w>>1, buf=new Float64Array(w);
+    for(let r=0;r<rows;r++){
+      const base=r*cols;
+      let n=0;
+      for(let c=0;c<=half&&c<cols;c++) buf[n++]=src[base+c];
+      for(let i=1;i<n;i++){ const v=buf[i]; let j=i-1; while(j>=0&&buf[j]>v){ buf[j+1]=buf[j]; j--; } buf[j+1]=v; }
+      for(let c=0;c<cols;c++){
+        out[base+c]=buf[n>>1];
+        const oldC=c-half;
+        if(oldC>=0){ const v=src[base+oldC]; let lo=0,hi=n; while(lo<hi){ const m=(lo+hi)>>1; if(buf[m]<v) lo=m+1; else hi=m; }
+          for(let i=lo;i<n-1;i++) buf[i]=buf[i+1]; n--; }
+        const newC=c+half+1;
+        if(newC<cols){ const v=src[base+newC]; let lo=0,hi=n; while(lo<hi){ const m=(lo+hi)>>1; if(buf[m]<v) lo=m+1; else hi=m; }
+          for(let i=n;i>lo;i--) buf[i]=buf[i-1]; buf[lo]=v; n++; }
+      }
+    }
+    return out;
+  }
+  function scanYield(){ return new Promise(r=>{
+    try{ if(typeof requestAnimationFrame==='function'){ requestAnimationFrame(()=>r()); return; } }catch(e){}
+    if(typeof setTimeout==='function') setTimeout(r,0); else Promise.resolve().then(r);
+  }); }
+  function scanProgress(pct,label){
+    const p=document.getElementById?document.getElementById('prog'):null;
+    if(p&&'value' in p) p.value=pct;
+    const t=document.getElementById?document.getElementById('progTxt'):null;
+    if(t) t.textContent=label+'… '+pct+'%';
+  }
+  function scanStatus(msg){ const el=document.getElementById?document.getElementById('scanStatus'):null; if(el) el.textContent=msg; }
+  function scanRmsDb(buffer){
+    let sum=0,n=0;
+    for(let c=0;c<(buffer.numberOfChannels||1);c++){ const d=buffer.getChannelData(c); for(let i=0;i<d.length;i++){ const v=d[i]; sum+=v*v; n++; } }
+    return n?20*Math.log10(Math.sqrt(sum/n)+1e-12):-120;
+  }
+  function scanEnergy(buffer){
+    let sum=0,n=0;
+    for(let c=0;c<(buffer.numberOfChannels||1);c++){ const d=buffer.getChannelData(c); for(let i=0;i<d.length;i++){ const v=d[i]; sum+=v*v; n++; } }
+    return n?sum/n:0;
+  }
+  function scanMakeBuffer(chData,sr){
+    const b=ac().createBuffer(chData.length,chData[0].length,sr);
+    for(let c=0;c<chData.length;c++) b.getChannelData(c).set(chData[c]);
+    return b;
+  }
+  // Four scan stems sum back to the original: percussive below 6 kHz -> Drums,
+  // harmonic below 160 Hz -> Bass, harmonic 160 Hz-6 kHz -> Vocals/Melody,
+  // everything at/above 6 kHz (both masks) -> Highs & Air.
+  function scanStemDefs(mode,sr){
+    if(mode==='drums') return [
+      {id:'kick',name:'Kick',type:'Drums',band:'lo',source:'p'},
+      {id:'snare',name:'Snare',type:'Drums',band:'mid',source:'p'},
+      {id:'hats',name:'Hats/Cymbals',type:'Drums',band:'high',source:'p'}
+    ];
+    return [
+      {id:'drums',name:'Drums & Percussion',type:'Drums',band:'belowHigh',source:'p'},
+      {id:'bass',name:'Bass',type:'Bass',band:'lo',source:'h'},
+      {id:'harmonic',name:'Vocals, Melody & Instruments (harmonic)',type:'Vocals',band:'mid',source:'h'},
+      {id:'highs',name:'Highs & Air',type:'Audio',band:'high',source:'one'}
+    ];
+  }
+  async function scanSeparateBuffer(buffer,onProgress,mode){
+    mode=mode||'scan';
+    if(!buffer||buffer.length<SCAN_FFT*2) throw new Error('Import an audio clip with at least 0.1 s of audio first.');
+    const sr=buffer.sampleRate, chans=buffer.numberOfChannels||1, N=SCAN_FFT, hop=SCAN_HOP, bins=N/2+1;
+    const data=[]; for(let c=0;c<chans;c++) data.push(buffer.getChannelData(c));
+    const frames=Math.floor((buffer.length-N)/hop)+1;
+    const timeWin=Math.max(9,(Math.round(0.45*sr/hop)|1));   // ~0.45 s median along time
+    const freqWin=Math.max(9,29);                            // 29 bins median along frequency
+    const halfT=timeWin>>1;
+    const hzPerBin=sr/N, kHigh=Math.max(1,Math.min(bins-1,Math.ceil(6000/hzPerBin)));
+    const kBass=Math.max(1,Math.min(kHigh,Math.ceil(160/hzPerBin)));
+    const win=new Float64Array(N); for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
+    const defs=scanStemDefs(mode,sr);
+    const outs=defs.map(()=>Array.from({length:chans},()=>new Float32Array(buffer.length)));
+    const segFrames=Math.max(64,Math.ceil(SCAN_SEG_SEC*sr/hop));
+    const segCount=Math.ceil(frames/segFrames);
+    for(let seg=0;seg<segCount;seg++){
+      const core0=seg*segFrames, core1=Math.min(frames,core0+segFrames);
+      const f0=Math.max(0,core0-halfT-2), f1=Math.min(frames,core1+halfT+2), nf=f1-f0;
+      const start=f0*hop, coreStart=core0*hop, coreEnd=(core1===frames)?buffer.length:core1*hop, len=coreEnd-start;
+      // Mono mix -> magnitude spectrogram (mask source), 2048 / hop 512.
+      const mag=new Float32Array(nf*bins), re=new Float64Array(N), im=new Float64Array(N);
+      for(let fi=0;fi<nf;fi++){
+        const off=(f0+fi)*hop, row=fi*bins;
+        for(let i=0;i<N;i++){ let s=0; for(let c=0;c<chans;c++) s+=data[c][off+i]||0; re[i]=s/chans*win[i]; im[i]=0; }
+        scanFFT(re,im,false);
+        for(let k=0;k<bins;k++) mag[row+k]=Math.sqrt(re[k]*re[k]+im[k]*im[k]);
+      }
+      const hm=scanMedianCols(mag,nf,bins,timeWin), pm=scanMedianRows(mag,nf,bins,freqWin);
+      // Window envelope for overlap-add normalisation (Hann^2 sum at each sample).
+      const env=new Float32Array(len);
+      for(let fi=0;fi<nf;fi++){ const woff=(f0+fi)*hop-start; for(let i=0;i<N;i++){ const idx=woff+i; if(idx>=0&&idx<len) env[idx]+=win[i]*win[i]; } }
+      // One channel at a time keeps peak memory bounded for a full-length song.
+      for(let c=0;c<chans;c++){
+        const cr=new Float32Array(nf*bins), ci=new Float32Array(nf*bins);
+        for(let fi=0;fi<nf;fi++){
+          const off=(f0+fi)*hop, row=fi*bins;
+          for(let i=0;i<N;i++){ re[i]=data[c][off+i]*win[i]; im[i]=0; }
+          scanFFT(re,im,false);
+          for(let k=0;k<bins;k++){ cr[row+k]=re[k]; ci[row+k]=im[k]; }
+        }
+        const hpv=new Float32Array(2*bins), ire=new Float64Array(N), iim=new Float64Array(N);
+        const acc=defs.map(()=>new Float32Array(len));
+        for(let fi=0;fi<nf;fi++){
+          const row=fi*bins;
+          let frameMax=0; for(let k=0;k<bins;k++) if(mag[row+k]>frameMax) frameMax=mag[row+k];
+          for(let k=0;k<bins;k++){
+            const H=hm[row+k], P=pm[row+k], H2=H*H, P2=P*P, den=H2+P2;
+            const h0=den>1e-12?H2/den:0.5;
+            // A transient stands well above its own time-median (H). Only bins
+            // that carry real energy in this frame count, so spectral-noise
+            // bins with a tiny median cannot turn a sustained note into drums.
+            const cur=mag[row+k];
+            const significant=cur>0.08*frameMax?1:0;
+            const ratio=cur/(H+1e-6);
+            const transient=significant?Math.max(0,Math.min(1,(ratio-1.5)/1.5)):0;
+            const p0=1-h0;
+            const p=p0+(1-p0)*transient;
+            hpv[k]=1-p; hpv[bins+k]=p;
+          }
+          const woff=(f0+fi)*hop-start;
+          for(let si=0;si<defs.length;si++){
+            const def=defs[si], band=def.band, src=def.source, dest=acc[si];
+            for(let k=0;k<N;k++){ ire[k]=0; iim[k]=0; }
+            for(let k=0;k<bins;k++){
+              let inBand;
+              if(band==='all') inBand=true;
+              else if(band==='lo') inBand=k<kBass;
+              else if(band==='mid') inBand=k>=kBass&&k<kHigh;
+              else if(band==='belowHigh') inBand=k<kHigh;
+              else inBand=k>=kHigh;
+              if(!inBand) continue;
+              const m=src==='p'?hpv[bins+k]:src==='h'?hpv[k]:1;
+              if(m>0){ ire[k]=cr[row+k]*m; iim[k]=ci[row+k]*m; }
+            }
+            // Restore the Hermitian mirror bins before the real inverse FFT:
+            // bin k and bin N-k must be conjugates or the sum loses half its level.
+            for(let k=1;k<bins-1;k++){ ire[N-k]=ire[k]; iim[N-k]=-iim[k]; }
+            scanFFT(ire,iim,true);
+            for(let i=0;i<N;i++){ const idx=woff+i; if(idx>=0&&idx<len) dest[idx]+=ire[i]*win[i]; }
+          }
+        }
+        for(let si=0;si<defs.length;si++){
+          const dest=acc[si];
+          for(let i=0;i<len;i++){ const e=env[i]; dest[i]=e>1e-8?dest[i]/e:0; }
+          outs[si][c].set(dest.subarray(coreStart-start,coreEnd-start),coreStart);
+        }
+      }
+      const pct=Math.round(100*(seg+1)/segCount);
+      if(typeof onProgress==='function') onProgress(pct);
+      scanProgress(pct,mode==='drums'?'Splitting drums':'Scanning');
+      await scanYield();
+    }
+    return defs.map((d,i)=>{
+      const b=scanMakeBuffer(outs[i],sr), rmsDb=scanRmsDb(b), detected=rmsDb>SCAN_DETECT_DB;
+      return {id:d.id,name:d.name,type:d.type,buffer:b,rmsDb:rmsDb,energy:scanEnergy(b),energyPct:0,
+              detected:detected,include:detected,mute:false,solo:false};
+    });
+  }
+  // Audition is pure gain routing so it can be asserted without relying on sound.
+  // Mute wins; with any Solo, only soloed stems sound. Stem play ignores M/S.
+  function scanAuditionGains(stems,mode,index){
+    if(mode==='stem') return stems.map((s,i)=>i===index?1:0);
+    const anySolo=stems.some(s=>s.solo);
+    return stems.map(s=>s.mute?0:(anySolo?(s.solo?1:0):1));
+  }
+  let scanPreview=null, scanBusy=false;
+  let scanAudition={sources:[],gains:[],mode:null,index:-1};
+  function scanStopAudition(){
+    scanAudition.sources.forEach(src=>{ try{ src.stop(); }catch(e){} try{ src.disconnect&&src.disconnect(); }catch(e){} });
+    scanAudition={sources:[],gains:[],mode:null,index:-1};
+    const b=document.getElementById?document.getElementById('btnStopAudition'):null;
+    if(b&&b.classList) b.classList.remove('active');
+  }
+  function scanApplyAuditionGains(){
+    if(!scanPreview||!scanAudition.gains.length) return;
+    const gs=scanAuditionGains(scanPreview.stems,scanAudition.mode,scanAudition.index);
+    gs.forEach((g,i)=>{ const node=scanAudition.gains[i]; if(node){ try{ node.gain.setValueAtTime(g,node.__ctx.currentTime); }catch(e){ node.gain.value=g; } node.gain.value=g; } });
+  }
+  async function scanStartAudition(mode,index){
+    if(!scanPreview) return;
+    scanStopAudition();
+    const ctx=await audioReady();
+    if(!scanPreview) return;
+    const gains=scanPreview.stems.map(()=>{ const g=ctx.createGain(); g.gain.value=0; g.__ctx=ctx; g.connect(ctx.destination); return g; });
+    const sources=scanPreview.stems.map((s,i)=>{
+      const src=ctx.createBufferSource(); src.buffer=s.buffer; src.connect(gains[i]);
+      try{ src.start(ctx.currentTime+0.02,0); }catch(e){ src.start(ctx.currentTime+0.02); }
+      return src;
+    });
+    scanAudition={sources,gains,mode,index};
+    scanApplyAuditionGains();
+    const b=document.getElementById?document.getElementById('btnStopAudition'):null;
+    if(b&&b.classList) b.classList.add('active');
+  }
+  function scanEsc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  function scanRenderList(){
+    const ul=document.getElementById?document.getElementById('scanList'):null;
+    if(!ul) return;
+    ul.innerHTML='';
+    if(!scanPreview){ ul.innerHTML='<li><span class="muted">No scan yet — import an audio clip, then Scan.</span></li>'; return; }
+    scanPreview.stems.forEach((s,i)=>{
+      const li=document.createElement('li'); li.className='stem-row';
+      const left=document.createElement('span');
+      const chk=document.createElement('input'); chk.type='checkbox'; chk.checked=!!s.include; chk.dataset.stemInclude=String(i);
+      chk.onchange=()=>{ s.include=!!chk.checked; };
+      const name=document.createElement('b'); name.textContent=s.name;
+      const meta=document.createElement('small'); meta.textContent=' — '+s.rmsDb.toFixed(1)+' dBFS • '+s.energyPct.toFixed(1)+'% • '+(s.detected?'Detected':'not detected');
+      left.appendChild(chk); left.appendChild(name); left.appendChild(meta);
+      const right=document.createElement('span');
+      const mk=(label,key,fn)=>{ const b=document.createElement('button'); b.className='btn'; b.dataset[key]=String(i); b.textContent=label; b.onclick=fn; return b; };
+      const play=mk('▶ Play','stemPlay',()=>scanStartAudition('stem',i));
+      const mute=mk(s.mute?'Unmute':'Mute','stemMute',()=>{ s.mute=!s.mute; scanApplyAuditionGains(); scanRenderList(); });
+      const solo=mk(s.solo?'Solo off':'Solo','stemSolo',()=>{ s.solo=!s.solo; scanApplyAuditionGains(); scanRenderList(); });
+      right.appendChild(play); right.appendChild(mute); right.appendChild(solo);
+      li.appendChild(left); li.appendChild(right); ul.appendChild(li);
+    });
+  }
+  function scanClearPreview(){
+    scanStopAudition(); scanPreview=null;
+    const ul=document.getElementById?document.getElementById('scanList'):null; if(ul) ul.innerHTML='';
+    const commit=document.getElementById?document.getElementById('btnCommitScan'):null; if(commit) commit.disabled=true;
+    const aud=document.getElementById?document.getElementById('scanAudition'):null; if(aud) aud.hidden=true;
+    const status=document.getElementById?document.getElementById('scanStatus'):null;
+    if(status) status.textContent='No preview yet — import an audio clip, then Scan.';
+  }
+  function switchStemTab(k){
+    $$('[data-stem]').forEach(b=>{ if(b.classList) b.classList.toggle('on',b.dataset&&b.dataset.stem===k); });
+    ['basic','scan','drums','scaler'].forEach(x=>{ const el=$('#stem'+x.charAt(0).toUpperCase()+x.slice(1)); if(el) el.hidden=x!==k; });
+  }
+  async function scanRun(mode,opts){
+    const picked=pickClipForAnalysis();
+    if(!picked){
+      scanStatus('Import an audio clip first — Scan needs real audio from a clip.');
+      importStatus('Import an audio clip first — Scan needs real audio from a clip.',true);
+      return null;
+    }
+    if(scanBusy) return null;
+    scanBusy=true;
+    const btn=document.getElementById?document.getElementById('btnScan'):null; if(btn) btn.disabled=true;
+    scanStopAudition();
+    scanStatus('Scanning '+picked.clip.name+'… 0%');
+    try{
+      const stems=await scanSeparateBuffer(picked.buffer,null,mode);
+      if(opts&&Array.isArray(opts.includeIds)){
+        stems.forEach(s=>{ s.include=opts.includeIds.indexOf(s.id)>=0; });
+      } else if(mode==='basic'){
+        const checked=$$('[data-stemchk]:checked').map(c=>c.dataset&&c.dataset.stemchk);
+        const map={Vocals:'harmonic',Drums:'drums',Bass:'bass',Other:'highs'};
+        const ids=checked.map(x=>map[x]).filter(Boolean);
+        stems.forEach(s=>{ s.include=ids.indexOf(s.id)>=0; });
+      }
+      const total=stems.reduce((a,s)=>a+s.energy,0)||1;
+      stems.forEach(s=>{ s.energyPct=Math.round(1000*s.energy/total)/10; });
+      scanPreview={mode,clipId:picked.clip.id,clipName:picked.clip.name,clipStart:picked.clip.start||0,
+                   sourceBuffer:picked.buffer,stems};
+      scanStatus('Scanned '+picked.clip.name+' — '+picked.buffer.duration.toFixed(1)+' s, '+stems.length+' stems. Audition in place, then Create Tracks or Discard.');
+      scanRenderList();
+      const commit=document.getElementById?document.getElementById('btnCommitScan'):null; if(commit) commit.disabled=false;
+      const aud=document.getElementById?document.getElementById('scanAudition'):null; if(aud) aud.hidden=false;
+      if(mode!=='scan') switchStemTab('scan');
+      return scanPreview;
+    }catch(e){
+      scanStatus('Scan failed: '+((e&&e.message)||e));
+      return null;
+    }finally{
+      scanBusy=false;
+      if(btn) btn.disabled=false;
+      scanProgress(100,mode==='drums'?'Splitting drums':'Scanning');
+    }
+  }
+  function scanBufferToWavBlob(buffer){
+    const chans=buffer.numberOfChannels||1, frames=buffer.length, sr=buffer.sampleRate;
+    const bytes=44+frames*chans*2, ab=new ArrayBuffer(bytes), dv=new DataView(ab);
+    const str=(o,s)=>{ for(let i=0;i<s.length;i++) dv.setUint8(o+i,s.charCodeAt(i)); };
+    str(0,'RIFF'); dv.setUint32(4,bytes-8,true); str(8,'WAVE'); str(12,'fmt ');
+    dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,chans,true);
+    dv.setUint32(24,sr,true); dv.setUint32(28,sr*chans*2,true); dv.setUint16(32,chans*2,true); dv.setUint16(34,16,true);
+    str(36,'data'); dv.setUint32(40,frames*chans*2,true);
+    const data=[]; for(let c=0;c<chans;c++) data.push(buffer.getChannelData(c));
+    let off=44;
+    for(let i=0;i<frames;i++) for(let c=0;c<chans;c++){
+      const v=Math.max(-1,Math.min(1,data[c][i]));
+      dv.setInt16(off,v<0?v*32768:v*32767,true); off+=2;
+    }
+    return new Blob([ab],{type:'audio/wav'});
+  }
+  async function scanCommitPreview(){
+    const p=scanPreview;
+    if(!p) return {created:0,audioIds:[]};
+    const sel=p.stems.filter(s=>s.include);
+    const secPerBar=(60/state.bpm)*4, audioIds=[], createdNames=[];
+    let stored=0;
+    for(let i=0;i<sel.length;i++){
+      const s=sel[i], audioId='s'+Date.now()+'-'+Math.floor(Math.random()*1000000)+'-'+i;
+      const blob=scanBufferToWavBlob(s.buffer);
+      const ok=await idbPut(audioId,blob); if(ok) stored++;
+      audioBuffers[audioId]=s.buffer;
+      const lenBars=Math.max(1,Math.ceil(s.buffer.duration/secPerBar));
+      const color=COLORS[(state.tracks.length+i)%COLORS.length];
+      const name=s.name+' — '+p.clipName;
+      state.tracks.push({id:Date.now()+i,name:name,type:s.type,color:color,vol:80,pan:0,mute:false,solo:false,
+        clips:[{id:audioId,audioId:audioId,name:name,start:p.clipStart,len:lenBars,
+                duration:Math.round(s.buffer.duration*100)/100,peaks:computePeaks(s.buffer),color:color}]});
+      audioIds.push(audioId); createdNames.push(name);
+    }
+    const made=audioIds.length;
+    scanClearPreview();
+    save(true); render();
+    const msg='Created '+made+' stem tracks'+(stored?' ('+stored+' WAV blobs saved in this browser)':'');
+    scanStatus(msg); importStatus(msg);
+    return {created:made,audioIds,audioId:audioIds[0],names:createdNames};
+  }
+  function scanDiscardPreview(){
+    const n=scanPreview?scanPreview.stems.length:0;
+    scanClearPreview();
+    scanStatus('Discarded preview — no tracks created.');
+    return {discarded:n};
+  }
+  $('#btnScan').onclick=()=>scanRun('scan');
+  $('#btnSeparate').onclick=()=>scanRun('basic');
+  $('#btnDrums').onclick=()=>scanRun('drums');
+  $('#btnPlayMix').onclick=()=>scanStartAudition('mix',-1);
+  $('#btnStopAudition').onclick=()=>scanStopAudition();
+  $('#btnCommitScan').onclick=()=>scanCommitPreview();
+  $('#btnDiscardScan').onclick=()=>scanDiscardPreview();
+  scanRenderList();
+  window.__reaScan={separateBuffer:scanSeparateBuffer,auditionGains:scanAuditionGains,run:scanRun,
+    commit:scanCommitPreview,discard:scanDiscardPreview,preview:()=>scanPreview,
+    wavBlob:scanBufferToWavBlob,rmsDb:scanRmsDb,energy:scanEnergy,
+    startAudition:scanStartAudition,stopAudition:scanStopAudition,applyGains:scanApplyAuditionGains,
+    auditionState:()=>scanAudition};
+
 window.__reaTempo={detectTempo,tempoEnvelope,pickClipForAnalysis,tempoResultHTML,runAnalyse:()=>$('#btnAnalyse').onclick()};
 const padNames=['Kick','Snare','Hat','Clap','Tom','Perc','Crash','FX']; $('#pads').innerHTML=padNames.map((n,i)=>'<button class="pad" data-pad="'+n+'">'+n+'<br><small>'+(i+1)+'</small></button>').join(''); $$('[data-pad]').forEach(b=>b.onclick=()=>drum(b.dataset.pad));
 loadAutosave(); render(); audioRestorePromise=restoreAudioFromIDB();
