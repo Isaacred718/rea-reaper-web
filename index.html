@@ -671,7 +671,7 @@ $('#btnDrums').onclick=()=>runProgress('Splitting drums',()=>{ ['Kick','Snare','
 // ---- Real tempo detector (lane 3): pure JS, no libraries / WASM / network ----
 // 60 s cap -> mono -> 1024-pt radix-2 FFT positive spectral flux (hop 512)
 // -> normalised autocorrelation for 40-200 BPM -> octave-aware peak pick.
-const TEMPO_CAP_SEC=60, TEMPO_HOP=512, TEMPO_FFT=1024, TEMPO_MIN_BPM=40, TEMPO_MAX_BPM=200;
+const TEMPO_CAP_SEC=60, TEMPO_HOP=512, TEMPO_FFT=1024, TEMPO_MIN_BPM=40, TEMPO_MAX_BPM=200, TEMPO_OCTAVE_TOL=0.04;
 function tempoNow(){ try{ return (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now(); }catch(e){ return Date.now(); } }
 function tempoFFT(re,im){
   const n=re.length;
@@ -737,44 +737,73 @@ function tempoRefine(ac,L){
 }
 function detectTempo(buffer,clipName){
   const t0=tempoNow(), sr=buffer.sampleRate, hop=TEMPO_HOP, name=clipName||'audio clip';
-  const duration=Math.min((buffer.duration||buffer.length/sr),TEMPO_CAP_SEC);
-  if(!buffer || buffer.length<sr*0.25) return {bpm:null,clear:false,clipName:name,clipDuration:duration,analysedSeconds:duration,rawBpm:null,alternatives:[],confidence:0,peak:0,runnerUp:0,runtimeMs:0,note:'clip too short'};
+  const duration=buffer?Math.min((buffer.duration||buffer.length/sr),TEMPO_CAP_SEC):0;
+  if(!buffer || buffer.length<sr*0.25) return {bpm:null,clear:false,clipName:name,clipDuration:duration,analysedSeconds:duration,rawBpm:null,alternatives:[],confidence:0,peak:0,chosenPeak:0,runnerUp:0,octaveRunnerUp:0,rawRunnerUp:0,frames:0,onsetFrames:0,runtimeMs:0,note:'clip too short',rejectReason:'the clip is shorter than 0.25 s'};
   const env=tempoEnvelope(buffer), M=env.length;
   const {ac,minLag,maxLag}=tempoAutocorr(env,sr,hop);
   let bestL=minLag,best=ac[minLag];
   for(let L=minLag;L<=maxLag;L++) if(ac[L]>best){ best=ac[L]; bestL=L; }
-  let runner=0;
-  for(let L=minLag;L<=maxLag;L++) if(Math.abs(L-bestL)>2 && ac[L]>=ac[L-1] && ac[L]>=ac[L+1] && ac[L]>runner) runner=ac[L];
+  let rawRunner=0;
+  for(let L=minLag;L<=maxLag;L++) if(Math.abs(L-bestL)>2 && ac[L]>=ac[L-1] && ac[L]>=ac[L+1] && ac[L]>rawRunner) rawRunner=ac[L];
   const Lf=tempoRefine(ac,bestL), rawBpm=sr*60/(hop*Lf);
   const acAt=L=>{ const l0=Math.floor(L),fr=L-l0; return (ac[l0]||0)*(1-fr)+(ac[l0+1]||0)*fr; };
   // Octave family: report each halving/doubling that stays inside 40-200 BPM.
-  const cands=[{rel:'raw',bpm:rawBpm,lag:Lf,ac:best}];
+  const cands=[{rel:'raw',bpm:rawBpm,lag:Lf,ac:acAt(Lf)}];
   for(let k=1;k<=4;k++){
     const mult=Math.pow(2,k), up=rawBpm*mult, ul=Lf/mult;
     if(up<=TEMPO_MAX_BPM&&ul>=minLag) cands.push({rel:'×'+mult,bpm:up,lag:ul,ac:acAt(ul)});
     const dn=rawBpm/mult, dl=Lf*mult;
     if(dn>=TEMPO_MIN_BPM&&dl<=maxLag) cands.push({rel:'÷'+mult,bpm:dn,lag:dl,ac:acAt(dl)});
   }
-  // Deliberate octave handling: autocorrelation happily locks onto a 2- or
-  // 4-beat pattern. If the raw best is outside the useful 70-160 BPM range
-  // (2 BPM edge tolerance), pick the strongest in-range octave instead. The raw
-  // best and every rejected option are reported for the ½× / 2× buttons.
-  let chosen=cands[0];
-  if(chosen.bpm<68||chosen.bpm>162){
-    const inBand=cands.filter(c=>c.bpm>=68&&c.bpm<=162).sort((a,b)=>b.ac-a.ac);
-    if(inBand.length) chosen=inBand[0];
+  // Every local AC peak in the useful 68-162 BPM band is a candidate, not just
+  // octaves of the raw best. The 85 BPM conductor fixture's raw best is a
+  // 1.5-beat lag (56.7 BPM) whose ×2 octave is 113 BPM; the true 85 BPM peak is
+  // a separate local maximum. Raw/octave candidates stay in the alternatives
+  // list so the ½× / 2× buttons keep their old behaviour.
+  const peaks=[];
+  for(let L=minLag;L<=maxLag;L++) if(ac[L]>=ac[L-1]&&ac[L]>=ac[L+1]){
+    const lf=tempoRefine(ac,L), bpm=sr*60/(hop*lf);
+    if(bpm>=TEMPO_MIN_BPM&&bpm<=TEMPO_MAX_BPM){
+      const oct=cands.find(c=>Math.abs(c.bpm-bpm)<=Math.max(1,bpm*0.02));
+      if(!oct) peaks.push({rel:'peak@'+Math.round(bpm*10)/10,bpm,lag:lf,ac:acAt(lf)});
+    }
   }
+  let chosen=cands[0];
+  const inBand=cands.concat(peaks).filter(c=>c.bpm>=68&&c.bpm<=162).sort((a,b)=>b.ac-a.ac);
+  if(inBand.length) chosen=inBand[0];
   let spike=0; for(let i=0;i<M;i++) if(env[i]>=0.25) spike++;
-  const rel=best/Math.max(0.01,runner);
-  // A steady tone has a smooth envelope: few onset spikes and no real periodic
-  // beats, so require >=3 periods and a real onset density before calling tempo.
-  const clear=M>=chosen.lag*3 && spike>=6 && best>=0.16 && isFinite(rel) && rel>=1.05;
-  const r1=x=>Math.round(x*10)/10;
+  const r1=x=>Math.round(x*10)/10, r2=x=>Math.round(x*100)/100, r3=x=>Math.round(x*1000)/1000;
+  // Family-aware confidence: the numerator stays the strongest AC peak in the
+  // chosen tempo's family (often the raw half/double lag). The required octave
+  // family is lag/4, lag/2, lag, lag*2, lag*4 (plus the raw lag when it is an
+  // octave of the chosen lag). The 85/130 conductor fixtures also put strong
+  // peaks at 3:2 and 3:1 metrical relatives of the beat, so the confidence
+  // runner also drops those same-grid lags. Genuinely different tempos still
+  // count as competitors and can reject the result.
+  const OCT_RATIOS=[0.25,0.5,1,2,4], GRID_RATIOS=[0.25,1/3,0.5,2/3,1,1.5,2,3,4];
+  const inRatios=(a,b,ratios)=>{ const q=a/b; return ratios.some(k=>Math.abs(q-k)<=TEMPO_OCTAVE_TOL*k); };
+  const lagsFor=ratios=>ratios.map(k=>chosen.lag*k).concat(inRatios(Lf,chosen.lag,ratios)?[Lf]:[]);
+  const octLags=lagsFor(OCT_RATIOS), gridLags=lagsFor(GRID_RATIOS);
+  const near=(L,lags)=>lags.some(fl=>Math.abs(L-fl)<=Math.max(2,TEMPO_OCTAVE_TOL*fl));
+  let octaveRunner=0, runner=0;
+  for(let L=minLag;L<=maxLag;L++) if(ac[L]>=ac[L-1]&&ac[L]>=ac[L+1]){
+    if(!near(L,octLags)&&ac[L]>octaveRunner) octaveRunner=ac[L];
+    if(!near(L,gridLags)&&ac[L]>runner) runner=ac[L];
+  }
+  const chosenPeak=acAt(chosen.lag), rel=best/Math.max(0.01,runner);
+  // Name every gate that actually failed; a drum loop with 36 onsets must not
+  // be told its onset count is the problem when the octave runner-up was.
+  const reasons=[];
+  if(best<0.16) reasons.push('the autocorrelation peak is too weak ('+r3(best)+' < 0.16)');
+  if(!isFinite(rel)||rel<1.05) reasons.push('low family confidence ('+r2(rel)+'× < 1.05× the next non-family peak)');
+  if(spike<6) reasons.push('too few onset frames ('+spike+' in '+M+' analysed; 6 needed)');
+  if(M<chosen.lag*3) reasons.push('too few periods for the chosen lag ('+M+' frames < '+Math.ceil(chosen.lag*3)+')');
+  const clear=reasons.length===0;
   return {
     bpm:clear?r1(chosen.bpm):null, rawBpm:r1(rawBpm), chosenRelation:chosen.rel,
-    alternatives:cands.filter(c=>c!==chosen).map(c=>({bpm:r1(c.bpm),relation:c.rel,ac:Math.round(c.ac*1000)/1000,rejected:true})),
-    confidence:Math.round(rel*100)/100, peak:Math.round(best*1000)/1000, runnerUp:Math.round(runner*1000)/1000,
-    clear,clipName:name,clipDuration:duration,analysedSeconds:duration,frames:M,onsetFrames:spike,
+    alternatives:cands.filter(c=>c!==chosen).map(c=>({bpm:r1(c.bpm),relation:c.rel,ac:r3(c.ac),rejected:true})),
+    confidence:r2(rel), peak:r3(best), chosenPeak:r3(chosenPeak), runnerUp:r3(runner), octaveRunnerUp:r3(octaveRunner), rawRunnerUp:r3(rawRunner),
+    clear,rejectReason:reasons.join('; '),clipName:name,clipDuration:duration,analysedSeconds:duration,frames:M,onsetFrames:spike,
     runtimeMs:Math.round((tempoNow()-t0)*10)/10
   };
 }
@@ -788,9 +817,9 @@ function pickClipForAnalysis(){
 function tempoEsc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function tempoResultHTML(r){
   if(!r) return 'No analysis yet — import an audio clip, then Analyse.';
-  if(!r.clear) return 'No clear tempo in <b>'+tempoEsc(r.clipName)+'</b> ('+r.clipDuration.toFixed(1)+' s) — only '+(r.onsetFrames||0)+' onset frames in '+r.frames+' analysed; a steady tone gives no beat to track, so no tempo is reported.<br><span class="muted">Key/chord detection is desktop-only for now.</span>';
+  if(!r.clear) return 'No clear tempo in <b>'+tempoEsc(r.clipName)+'</b> ('+r.clipDuration.toFixed(1)+' s) — '+(r.rejectReason||'the detector found no reliable beat')+'.<br><span class="muted">Gate numbers: AC peak '+r.peak.toFixed(2)+', chosen-peak AC '+r.chosenPeak.toFixed(2)+', family confidence '+r.confidence.toFixed(2)+'× vs next non-family peak ('+r.runnerUp.toFixed(2)+'), '+r.onsetFrames+' onset frames in '+r.frames+' analysed.</span><br><span class="muted">Key/chord detection is desktop-only for now.</span>';
   const alts=r.alternatives.length?'; rejected: '+r.alternatives.map(a=>a.bpm.toFixed(1)+' BPM ('+a.relation+')').join(', '):'';
-  return '<b>Tempo:</b> '+r.bpm.toFixed(1)+' BPM <span class="muted">(relative confidence '+r.confidence.toFixed(2)+'× next peak, peak '+r.peak.toFixed(2)+')</span><br>'+
+  return '<b>Tempo:</b> '+r.bpm.toFixed(1)+' BPM <span class="muted">(relative confidence '+r.confidence.toFixed(2)+'× next non-family peak, chosen AC peak '+r.chosenPeak.toFixed(2)+' vs '+r.runnerUp.toFixed(2)+'; raw AC peak '+r.peak.toFixed(2)+')</span><br>'+
     '<b>Clip:</b> '+tempoEsc(r.clipName)+' — '+r.clipDuration.toFixed(1)+' s (first '+r.analysedSeconds.toFixed(1)+' s analysed)<br>'+
     '<span class="muted">Raw autocorrelation best: '+r.rawBpm.toFixed(1)+' BPM'+alts+'. Use ½× / 2× if the octave is wrong.</span><br>'+
     '<span class="muted">Key/chord detection is desktop-only for now.</span>';
