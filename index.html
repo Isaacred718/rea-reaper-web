@@ -997,7 +997,7 @@ $('#btnAnalyse').onclick=async ()=>{
   await new Promise(r=>{ if(typeof requestAnimationFrame==='function') requestAnimationFrame(()=>r()); else Promise.resolve().then(r); });
   try{
     const r=detectTempo(picked.buffer,picked.clip.name);
-    picked.clip.tempoSpan=r.clear?{spanStartSec:r.spanStartSec,spanSec:r.spanSec}:null;
+    picked.clip.tempoSpan=r.clear?{spanStartSec:r.spanStartSec,spanSec:r.spanSec}:null; render();
     state._tempoResult=r; state._detectedTempo=r.clear?r.bpm:null; delete state._chords;
     out.innerHTML=tempoResultHTML(r); save(true);
   }catch(e){ out.textContent='Tempo analysis failed: '+((e&&e.message)||e); }
